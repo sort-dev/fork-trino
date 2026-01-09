@@ -16,6 +16,8 @@ package io.trino.plugin.iceberg;
 import com.google.common.base.VerifyException;
 import com.google.common.math.LongMath;
 import io.airlift.slice.Slice;
+import io.trino.plugin.geospatial.GeometryType;
+import io.trino.plugin.geospatial.SphericalGeographyType;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
@@ -96,6 +98,10 @@ public final class ExpressionConverter
         if (domain.getType() == VARIANT) {
             // Iceberg does not support filtering on VARIANT type, but simple checks always work
             return domain.isOnlyNull() || domain.getValues().isAll();
+        }
+        // Geometry and Geography types are not supported for predicate pushdown in Iceberg
+        if (domain.getType() instanceof GeometryType || domain.getType() instanceof SphericalGeographyType) {
+            return false;
         }
 
         if (domain.getType() == UUID) {

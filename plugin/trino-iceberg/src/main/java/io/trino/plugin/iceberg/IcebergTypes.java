@@ -16,11 +16,17 @@ package io.trino.plugin.iceberg;
 import com.google.common.math.LongMath;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import io.trino.geospatial.serde.JtsGeometrySerde;
+import io.trino.plugin.geospatial.GeometryType;
+import io.trino.plugin.geospatial.SphericalGeographyType;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
@@ -33,6 +39,7 @@ import java.nio.CharBuffer;
 import java.util.UUID;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.geospatial.serde.JtsGeometrySerde.OGC_CRS84_SRID;
 import static io.trino.plugin.base.io.ByteBuffers.getWrappedBytes;
 import static io.trino.plugin.iceberg.util.Timestamps.timestampFromNanos;
 import static io.trino.plugin.iceberg.util.Timestamps.timestampToNanos;
@@ -143,6 +150,12 @@ public final class IcebergTypes
             return trinoUuidToJavaUuid(((Slice) trinoNativeValue));
         }
 
+        // Geometry and Geography should never reach here - they're excluded from
+        // predicate pushdown and statistics collection
+        if (type instanceof GeometryType || type instanceof SphericalGeographyType) {
+            throw new UnsupportedOperationException("Geometry/Geography values cannot be converted for Iceberg expressions or statistics");
+        }
+
         throw new UnsupportedOperationException("Unsupported type: " + type);
     }
 
@@ -213,6 +226,52 @@ public final class IcebergTypes
             return javaUuidToTrinoUuid((UUID) value);
         }
 
+        // Geometry and Geography should never reach here - they're excluded from
+        // partitioning and statistics
+        if (icebergType instanceof Types.GeometryType || icebergType instanceof Types.GeographyType) {
+            throw new UnsupportedOperationException("Geometry/Geography values cannot be converted from Iceberg partition or statistics values");
+        }
+
         throw new UnsupportedOperationException("Unsupported iceberg type: " + icebergType);
+    }
+
+    public static boolean containsGeometry(io.trino.spi.type.Type type)
+    {
+        if (type instanceof GeometryType || type instanceof SphericalGeographyType) {
+            return true;
+        }
+        if (type instanceof ArrayType arrayType) {
+            return containsGeometry(arrayType.getElementType());
+        }
+        if (type instanceof MapType mapType) {
+            return containsGeometry(mapType.getKeyType()) || containsGeometry(mapType.getValueType());
+        }
+        if (type instanceof RowType rowType) {
+            return rowType.getFields().stream().anyMatch(field -> containsGeometry(field.getType()));
+        }
+        return false;
+    }
+
+    public static boolean containsGeometry(org.apache.iceberg.types.Type type)
+    {
+        return switch (type.typeId()) {
+            case GEOMETRY, GEOGRAPHY -> true;
+            case LIST -> containsGeometry(type.asListType().elementType());
+            case MAP -> containsGeometry(type.asMapType().keyType()) || containsGeometry(type.asMapType().valueType());
+            case STRUCT -> type.asStructType().fields().stream().anyMatch(field -> containsGeometry(field.type()));
+            default -> false;
+        };
+    }
+
+    public static int getGeometrySrid(Types.GeometryType geometryType)
+    {
+        String crs = geometryType.crs();
+        return (crs == null) ? OGC_CRS84_SRID : JtsGeometrySerde.crsToSrid(crs);
+    }
+
+    public static int getGeographySrid(Types.GeographyType geographyType)
+    {
+        String crs = geographyType.crs();
+        return (crs == null) ? OGC_CRS84_SRID : JtsGeometrySerde.crsToSrid(crs);
     }
 }

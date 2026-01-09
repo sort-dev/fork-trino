@@ -14,6 +14,9 @@
 package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.geospatial.serde.JtsGeometrySerde;
+import io.trino.plugin.geospatial.GeometryType;
+import io.trino.plugin.geospatial.SphericalGeographyType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
@@ -36,7 +39,9 @@ import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
+import org.apache.iceberg.types.EdgeAlgorithm;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.types.Types.GeographyType;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -47,6 +52,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.plugin.geospatial.GeometryType.GEOMETRY;
+import static io.trino.plugin.geospatial.SphericalGeographyType.SPHERICAL_GEOGRAPHY;
 import static io.trino.spi.StandardErrorCode.DUPLICATE_COLUMN_NAME;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.TimeType.TIME_MICROS;
@@ -58,6 +65,7 @@ import static io.trino.spi.type.UuidType.UUID;
 import static io.trino.spi.type.VariantType.VARIANT;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
+import static org.apache.iceberg.types.EdgeAlgorithm.SPHERICAL;
 
 public final class TypeConverter
 {
@@ -110,7 +118,30 @@ public final class TypeConverter
             case VARIANT:
                 return VARIANT;
             case GEOMETRY:
+                Types.GeometryType geometryType = (Types.GeometryType) type;
+                String geometryCrs = geometryType.crs();
+                if (geometryCrs != null) {
+                    try {
+                        JtsGeometrySerde.crsToSrid(geometryCrs);
+                    }
+                    catch (IllegalArgumentException e) {
+                        throw new TrinoException(NOT_SUPPORTED, "Unsupported geometry CRS '%s'. Supported values are OGC:CRS84/CRS84 and positive EPSG codes.".formatted(geometryCrs), e);
+                    }
+                }
+                return GEOMETRY;
             case GEOGRAPHY:
+                GeographyType geographyType = (GeographyType) type;
+                // Validate WGS84 (OGC:CRS84) with spherical algorithm
+                String crs = geographyType.crs();
+                // CRS null is treated as WGS84
+                if (crs != null && !crs.equalsIgnoreCase("OGC:CRS84") && !crs.equalsIgnoreCase("EPSG:4326")) {
+                    throw new TrinoException(NOT_SUPPORTED, "Unsupported geography CRS '%s'. Only WGS84 (OGC:CRS84 or EPSG:4326) is supported.".formatted(crs));
+                }
+                EdgeAlgorithm algorithm = geographyType.algorithm();
+                if (algorithm != null && algorithm != SPHERICAL) {
+                    throw new TrinoException(NOT_SUPPORTED, "Unsupported geography algorithm '%s'. Only 'SPHERICAL' is supported.".formatted(algorithm));
+                }
+                return SPHERICAL_GEOGRAPHY;
             case UNKNOWN:
                 break;
         }
@@ -185,6 +216,14 @@ public final class TypeConverter
         }
         if (type instanceof MapType mapType) {
             return fromMap(mapType, columnIdentity, nextFieldId);
+        }
+        if (type instanceof GeometryType) {
+            // Default to OGC:CRS84 (WGS84)
+            return Types.GeometryType.of("OGC:CRS84");
+        }
+        if (type instanceof SphericalGeographyType) {
+            // Always WGS84 with spherical algorithm
+            return GeographyType.of("OGC:CRS84", SPHERICAL);
         }
         if (type instanceof TimeType timeType) {
             throw new TrinoException(NOT_SUPPORTED, format("Time precision (%s) not supported for Iceberg. Use \"time(6)\" instead.", timeType.getPrecision()));

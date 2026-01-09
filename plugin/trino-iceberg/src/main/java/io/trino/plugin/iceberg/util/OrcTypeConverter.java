@@ -88,7 +88,7 @@ public final class OrcTypeConverter
                 yield ImmutableList.of(new OrcType(timestampKind, ImmutableList.of(), ImmutableList.of(), Optional.empty(), Optional.empty(), Optional.empty(), attributes));
             }
             case STRING -> ImmutableList.of(new OrcType(OrcTypeKind.STRING, ImmutableList.of(), ImmutableList.of(), Optional.empty(), Optional.empty(), Optional.empty(), attributes));
-            case FIXED, BINARY -> ImmutableList.of(new OrcType(OrcTypeKind.BINARY, ImmutableList.of(), ImmutableList.of(), Optional.empty(), Optional.empty(), Optional.empty(), attributes));
+            case FIXED, BINARY, GEOMETRY, GEOGRAPHY -> ImmutableList.of(new OrcType(OrcTypeKind.BINARY, ImmutableList.of(), ImmutableList.of(), Optional.empty(), Optional.empty(), Optional.empty(), attributes));
             case DECIMAL -> {
                 DecimalType decimalType = (DecimalType) type;
                 yield ImmutableList.of(new OrcType(OrcTypeKind.DECIMAL, ImmutableList.of(), ImmutableList.of(), Optional.empty(), Optional.of(decimalType.precision()), Optional.of(decimalType.scale()), attributes));
@@ -101,7 +101,7 @@ public final class OrcTypeConverter
                 yield ImmutableList.of(new OrcType(OrcTypeKind.BINARY, ImmutableList.of(), ImmutableList.of(), Optional.empty(), Optional.empty(), Optional.empty(), attributes));
             }
             case VARIANT -> toOrcVariantType(nextFieldTypeIndex, attributes);
-            case GEOMETRY, GEOGRAPHY, UNKNOWN -> throw new TrinoException(NOT_SUPPORTED, "Unsupported Iceberg type: " + type);
+            case UNKNOWN -> throw new TrinoException(NOT_SUPPORTED, "Unsupported Iceberg type: " + type);
             case STRUCT -> toOrcStructType(nextFieldTypeIndex, (StructType) type, attributes);
             case LIST -> toOrcListType(nextFieldTypeIndex, (ListType) type, attributes);
             case MAP -> toOrcMapType(nextFieldTypeIndex, (MapType) type, attributes);

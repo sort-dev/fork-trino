@@ -30,10 +30,13 @@ import static io.trino.geospatial.GeometryType.MULTI_POINT;
 import static io.trino.geospatial.GeometryType.MULTI_POLYGON;
 import static io.trino.geospatial.GeometryType.POINT;
 import static io.trino.geospatial.GeometryType.POLYGON;
+import static io.trino.geospatial.serde.JtsGeometrySerde.crsToSrid;
 import static io.trino.geospatial.serde.JtsGeometrySerde.deserialize;
 import static io.trino.geospatial.serde.JtsGeometrySerde.deserializeEnvelope;
 import static io.trino.geospatial.serde.JtsGeometrySerde.deserializeType;
+import static io.trino.geospatial.serde.JtsGeometrySerde.ewkbToWkb;
 import static io.trino.geospatial.serde.JtsGeometrySerde.serialize;
+import static io.trino.geospatial.serde.JtsGeometrySerde.wkbToEwkb;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -143,6 +146,31 @@ public class TestGeometrySerialization
     public void testGeometryCollectionSridRoundTrip()
     {
         testSerializationWithSrid("GEOMETRYCOLLECTION (POINT (1 2), LINESTRING (0 0, 1 2, 3 4))", 3857);
+    }
+
+    @Test
+    public void testCrsToSridRejectsNonPositiveEpsgCodes()
+    {
+        assertThat(crsToSrid("EPSG:3857")).isEqualTo(3857);
+        assertThatThrownBy(() -> crsToSrid("EPSG:0"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Invalid EPSG code: EPSG:0");
+        assertThatThrownBy(() -> crsToSrid("EPSG:-3857"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Invalid EPSG code: EPSG:-3857");
+    }
+
+    @Test
+    public void testWkbToEwkbRejectsEwkbInput()
+    {
+        Geometry geometry = createJtsGeometry("POINT (1 2)");
+        geometry.setSRID(3857);
+        Slice ewkb = serialize(geometry);
+
+        assertThat(ewkbToWkb(ewkb)).isNotEqualTo(ewkb);
+        assertThatThrownBy(() -> wkbToEwkb(ewkb, 3857))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Input already has SRID flag set (expected WKB, got EWKB)");
     }
 
     @Test
