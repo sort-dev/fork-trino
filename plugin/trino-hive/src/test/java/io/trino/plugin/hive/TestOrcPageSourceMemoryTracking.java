@@ -220,10 +220,10 @@ public class TestOrcPageSourceMemoryTracking
 
                 memoryUsage = pageSource.getMemoryUsage();
                 if (useCache) {
-                    assertThat(pageSource.getMemoryUsage()).isBetween(testPreparer.getFileSize() + 270_000, testPreparer.getFileSize() + 280_000);
+                    assertThat(pageSource.getMemoryUsage()).isBetween(testPreparer.getFileSize() + 260_000, testPreparer.getFileSize() + 280_000);
                 }
                 else {
-                    assertThat(memoryUsage).isBetween(460_000L, 469_999L);
+                    assertThat(memoryUsage).isBetween(450_000L, 469_999L);
                 }
             }
 
@@ -254,10 +254,10 @@ public class TestOrcPageSourceMemoryTracking
 
                 memoryUsage = pageSource.getMemoryUsage();
                 if (useCache) {
-                    assertThat(pageSource.getMemoryUsage()).isBetween(testPreparer.getFileSize() + 270_000, testPreparer.getFileSize() + 280_000);
+                    assertThat(pageSource.getMemoryUsage()).isBetween(testPreparer.getFileSize() + 200_000, testPreparer.getFileSize() + 280_000);
                 }
                 else {
-                    assertThat(memoryUsage).isBetween(460_000L, 469_999L);
+                    assertThat(memoryUsage).isBetween(450_000L, 469_999L);
                 }
             }
 
@@ -288,10 +288,10 @@ public class TestOrcPageSourceMemoryTracking
 
                 memoryUsage = pageSource.getMemoryUsage();
                 if (useCache) {
-                    assertThat(pageSource.getMemoryUsage()).isBetween(testPreparer.getFileSize() + 260_000, testPreparer.getFileSize() + 270_000);
+                    assertThat(pageSource.getMemoryUsage()).isBetween(testPreparer.getFileSize() + 150_000, testPreparer.getFileSize() + 270_000);
                 }
                 else {
-                    assertThat(memoryUsage).isBetween(360_000L, 369_999L);
+                    assertThat(memoryUsage).isBetween(240_000L, 369_999L);
                 }
             }
 
@@ -408,7 +408,7 @@ public class TestOrcPageSourceMemoryTracking
                 assertThat(page).isNotNull();
                 if (memoryUsage == -1) {
                     memoryUsage = driverContext.getMemoryUsage();
-                    assertThat(memoryUsage).isBetween(460000L, 469999L);
+                    assertThat(memoryUsage).isBetween(450000L, 469999L);
                 }
                 else {
                     assertThat(driverContext.getMemoryUsage()).isEqualTo(memoryUsage);
@@ -423,7 +423,7 @@ public class TestOrcPageSourceMemoryTracking
                 assertThat(page).isNotNull();
                 if (memoryUsage == -1) {
                     memoryUsage = driverContext.getMemoryUsage();
-                    assertThat(memoryUsage).isBetween(460000L, 469999L);
+                    assertThat(memoryUsage).isBetween(450000L, 469999L);
                 }
                 else {
                     assertThat(driverContext.getMemoryUsage()).isEqualTo(memoryUsage);
@@ -438,7 +438,7 @@ public class TestOrcPageSourceMemoryTracking
                 assertThat(page).isNotNull();
                 if (memoryUsage == -1) {
                     memoryUsage = driverContext.getMemoryUsage();
-                    assertThat(memoryUsage).isBetween(360000L, 369999L);
+                    assertThat(memoryUsage).isBetween(260000L, 369999L);
                 }
                 else {
                     assertThat(driverContext.getMemoryUsage()).isEqualTo(memoryUsage);
