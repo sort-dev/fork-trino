@@ -9,7 +9,7 @@ Reads Ducklake metadata from a JDBC catalog database (SQLite or PostgreSQL) and 
 - [STATUS.md](STATUS.md) — Current implementation state, gaps, and concerns.
 - [REUSE.md](REUSE.md) — What we reuse from Trino/Iceberg and what's custom.
 - [REPORT_DUCKLAKE_PARTITION_PROB.md](REPORT_DUCKLAKE_PARTITION_PROB.md) — Open issue: temporal partition values in DuckDB don't match spec.
-- [Ducklake Specification](ducklake-spec/introduction.md) 
+- [Ducklake Specification](ducklake-spec/index.md) - includes ducklake spec and duckdb ducklake extension docs
 
 ## Configuration
 
