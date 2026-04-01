@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeColumnStats;
+import io.trino.plugin.ducklake.catalog.DucklakeInlinedDataInfo;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionField;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionSpec;
 import io.trino.plugin.ducklake.catalog.DucklakeSchema;
@@ -45,6 +46,7 @@ import io.trino.spi.type.Type;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -200,11 +202,18 @@ public class DucklakeMetadata
         DucklakeTableHandle table = (DucklakeTableHandle) tableHandle;
 
         Optional<DucklakeTableStats> tableStats = catalog.getTableStats(table.tableId());
-        if (tableStats.isEmpty()) {
-            return TableStatistics.empty();
+        long recordCount;
+        if (tableStats.isPresent()) {
+            recordCount = tableStats.get().recordCount();
+        }
+        else {
+            OptionalLong fallbackRecordCount = getFallbackRecordCount(table);
+            if (fallbackRecordCount.isEmpty()) {
+                return TableStatistics.empty();
+            }
+            recordCount = fallbackRecordCount.getAsLong();
         }
 
-        long recordCount = tableStats.get().recordCount();
         TableStatistics.Builder stats = TableStatistics.builder()
                 .setRowCount(Estimate.of(recordCount));
 
@@ -247,6 +256,33 @@ public class DucklakeMetadata
         }
 
         return stats.build();
+    }
+
+    private OptionalLong getFallbackRecordCount(DucklakeTableHandle table)
+    {
+        // Align with Iceberg/Delta behavior: if we can prove there is no data at this snapshot,
+        // return row count 0 instead of unknown.
+        if (!catalog.getDataFiles(table.tableId(), table.snapshotId()).isEmpty()) {
+            // Data files exist but no table stats were found. Keep row count unknown.
+            return OptionalLong.empty();
+        }
+
+        Optional<DucklakeInlinedDataInfo> inlinedInfo = catalog.getInlinedDataInfo(table.tableId(), table.snapshotId());
+        if (inlinedInfo.isEmpty()) {
+            return OptionalLong.of(0);
+        }
+
+        List<DucklakeColumn> tableColumns = catalog.getTableColumns(table.tableId(), table.snapshotId());
+        if (tableColumns.isEmpty()) {
+            return OptionalLong.of(0);
+        }
+
+        long inlinedRowCount = catalog.readInlinedData(
+                table.tableId(),
+                inlinedInfo.get().schemaVersion(),
+                table.snapshotId(),
+                ImmutableList.of(tableColumns.getFirst())).size();
+        return OptionalLong.of(inlinedRowCount);
     }
 
     private static Optional<DoubleRange> toDoubleRange(Type type, DucklakeColumnStats stats)
@@ -301,11 +337,15 @@ public class DucklakeMetadata
 
         if (!newPredicate.isNone()) {
             for (Map.Entry<DucklakeColumnHandle, Domain> entry : newPredicate.getDomains().orElse(Map.of()).entrySet()) {
-                if (canEnforceColumnConstraint(partitionSpecs, entry.getKey())) {
-                    enforced.put(entry.getKey(), entry.getValue());
-                }
-                else {
-                    unenforced.put(entry.getKey(), entry.getValue());
+                switch (classifyColumnConstraint(partitionSpecs, entry.getKey())) {
+                    case FULLY_ENFORCED -> enforced.put(entry.getKey(), entry.getValue());
+                    case PARTIALLY_ENFORCED -> {
+                        // Keep in both predicates: connector can use partition transforms for pruning,
+                        // but engine must still evaluate original predicate for correctness.
+                        enforced.put(entry.getKey(), entry.getValue());
+                        unenforced.put(entry.getKey(), entry.getValue());
+                    }
+                    case NOT_ENFORCED -> unenforced.put(entry.getKey(), entry.getValue());
                 }
             }
         }
@@ -333,9 +373,8 @@ public class DucklakeMetadata
                 combinedUnenforced,
                 combinedEnforced);
 
-        // Enforced predicates are NOT returned as remaining filter — the connector
-        // guarantees correct elimination via partition-value pruning.
-        // Unenforced predicates are returned so the engine still verifies them.
+        // Fully enforced predicates are omitted from remaining filter.
+        // Partially enforced predicates (e.g. temporal transforms) remain so engine verifies exact semantics.
         TupleDomain<ColumnHandle> remainingFilter = newUnenforced.transformKeys(ColumnHandle.class::cast);
 
         return Optional.of(new ConstraintApplicationResult<>(
@@ -345,33 +384,57 @@ public class DucklakeMetadata
                 false));
     }
 
-    private static boolean canEnforceColumnConstraint(
+    private static ConstraintEnforcement classifyColumnConstraint(
             List<DucklakePartitionSpec> specs,
             DucklakeColumnHandle column)
     {
         if (specs.isEmpty()) {
-            return false;
+            return ConstraintEnforcement.NOT_ENFORCED;
         }
-        // A predicate can only be enforced if it is enforceable in EVERY active spec
+
+        boolean fullyEnforced = true;
+        // A predicate can only be enforced (fully or partially) if it is enforceable in EVERY active spec
         // (spec evolution means different files may have different partition schemes)
-        return specs.stream().allMatch(spec ->
-                spec.fields().stream().anyMatch(field ->
-                        field.columnId() == column.columnId() && canEnforceWithTransform(field, column)));
+        for (DucklakePartitionSpec spec : specs) {
+            Optional<DucklakePartitionField> field = spec.fields().stream()
+                    .filter(partitionField -> partitionField.columnId() == column.columnId())
+                    .findFirst();
+            if (field.isEmpty()) {
+                return ConstraintEnforcement.NOT_ENFORCED;
+            }
+
+            ConstraintEnforcement fieldEnforcement = classifyTransformEnforcement(field.get(), column);
+            if (fieldEnforcement == ConstraintEnforcement.NOT_ENFORCED) {
+                return ConstraintEnforcement.NOT_ENFORCED;
+            }
+            if (fieldEnforcement == ConstraintEnforcement.PARTIALLY_ENFORCED) {
+                fullyEnforced = false;
+            }
+        }
+        return fullyEnforced ? ConstraintEnforcement.FULLY_ENFORCED : ConstraintEnforcement.PARTIALLY_ENFORCED;
     }
 
-    private static boolean canEnforceWithTransform(DucklakePartitionField field, DucklakeColumnHandle column)
+    private static ConstraintEnforcement classifyTransformEnforcement(DucklakePartitionField field, DucklakeColumnHandle column)
     {
         if (field.transform().isIdentity()) {
-            return true;
+            return ConstraintEnforcement.FULLY_ENFORCED;
         }
         if (field.transform().isTemporal()) {
-            // Temporal transforms (year/month/day/hour) on date/timestamp columns are enforceable
-            // because the transform is monotonic — if a predicate range maps to a set of
-            // transformed values, files outside that set can be safely skipped.
+            // Temporal transforms support safe partition pruning but do not fully enforce
+            // original predicates (e.g. day equality with month transform).
             Type type = column.columnType();
-            return type.equals(DATE) || type.equals(TIMESTAMP_MILLIS) || type.equals(TIMESTAMP_MICROS);
+            if (type.equals(DATE) || type.equals(TIMESTAMP_MILLIS) || type.equals(TIMESTAMP_MICROS)) {
+                return ConstraintEnforcement.PARTIALLY_ENFORCED;
+            }
         }
-        return false;
+        return ConstraintEnforcement.NOT_ENFORCED;
+    }
+
+    private enum ConstraintEnforcement
+    {
+        FULLY_ENFORCED,
+        PARTIALLY_ENFORCED,
+        NOT_ENFORCED
     }
 
     private static TupleDomain<DucklakeColumnHandle> extractDucklakePredicate(TupleDomain<ColumnHandle> summary)

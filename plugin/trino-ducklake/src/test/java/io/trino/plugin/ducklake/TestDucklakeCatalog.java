@@ -411,9 +411,25 @@ public class TestDucklakeCatalog
         io.trino.spi.statistics.TableStatistics stats = metadata.getTableStatistics(
                 io.trino.testing.connector.TestingConnectorSession.SESSION, tableHandle);
 
-        // Empty table may have unknown row-count estimate if stats are absent.
-        assertThat(stats.getRowCount().isUnknown()).isTrue();
+        assertThat(stats.getRowCount().getValue()).isEqualTo(0.0);
         assertThat(stats.getColumnStatistics()).isEmpty();
+    }
+
+    @Test
+    public void testGetTableStatisticsForInlinedTable()
+    {
+        long snapshotId = catalog.getCurrentSnapshotId();
+        DucklakeTable table = getTable("test_schema", "inlined_table", snapshotId);
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "inlined_table", table.tableId(), snapshotId);
+
+        DucklakeTypeConverter typeConverter = new DucklakeTypeConverter(
+                io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER);
+        DucklakeMetadata metadata = new DucklakeMetadata(catalog, typeConverter);
+        io.trino.spi.statistics.TableStatistics stats = metadata.getTableStatistics(
+                io.trino.testing.connector.TestingConnectorSession.SESSION, tableHandle);
+
+        assertThat(stats.getRowCount().getValue()).isEqualTo(3.0);
     }
 
     private DucklakeSchema getSchema(String schemaName, long snapshotId)

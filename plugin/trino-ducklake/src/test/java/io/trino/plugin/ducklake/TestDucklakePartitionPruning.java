@@ -98,9 +98,9 @@ public class TestDucklakePartitionPruning
         List<DucklakePartitionSpec> specs = catalog.getPartitionSpecs(
                 partitionedTable.tableId(), snapshotId);
 
-        assertThat(specs).isNotEmpty();
-        assertThat(specs.get(0).fields()).hasSize(1);
-        assertThat(specs.get(0).fields().get(0).transform()).isEqualTo(DucklakePartitionTransform.IDENTITY);
+        assertThat(specs).hasSize(1);
+        assertThat(specs.getFirst().fields()).hasSize(1);
+        assertThat(specs.getFirst().fields().getFirst().transform()).isEqualTo(DucklakePartitionTransform.IDENTITY);
     }
 
     @Test
@@ -109,11 +109,11 @@ public class TestDucklakePartitionPruning
         Map<Long, List<DucklakeFilePartitionValue>> values = catalog.getFilePartitionValues(
                 partitionedTable.tableId(), snapshotId);
 
-        assertThat(values).isNotEmpty();
+        assertThat(values).hasSize(3);
         // Each file should have a partition value for region
         for (List<DucklakeFilePartitionValue> fileValues : values.values()) {
-            assertThat(fileValues).isNotEmpty();
-            assertThat(fileValues.get(0).partitionKeyIndex()).isEqualTo(0);
+            assertThat(fileValues).hasSize(1);
+            assertThat(fileValues.getFirst().partitionKeyIndex()).isEqualTo(0);
         }
     }
 
@@ -351,8 +351,8 @@ public class TestDucklakePartitionPruning
         List<DucklakePartitionSpec> specs = catalog.getPartitionSpecs(
                 temporalPartitionedTable.tableId(), snapshotId);
 
-        assertThat(specs).isNotEmpty();
-        DucklakePartitionSpec spec = specs.get(0);
+        assertThat(specs).hasSize(1);
+        DucklakePartitionSpec spec = specs.getFirst();
         assertThat(spec.fields()).hasSize(2);
         assertThat(spec.fields().get(0).transform()).isEqualTo(DucklakePartitionTransform.YEAR);
         assertThat(spec.fields().get(1).transform()).isEqualTo(DucklakePartitionTransform.MONTH);
@@ -364,7 +364,7 @@ public class TestDucklakePartitionPruning
         Map<Long, List<DucklakeFilePartitionValue>> values = catalog.getFilePartitionValues(
                 temporalPartitionedTable.tableId(), snapshotId);
 
-        assertThat(values).isNotEmpty();
+        assertThat(values).hasSize(3);
         // Each file should have 2 partition values (year + month)
         for (List<DucklakeFilePartitionValue> fileValues : values.values()) {
             assertThat(fileValues).hasSize(2);
@@ -403,8 +403,9 @@ public class TestDucklakePartitionPruning
         assertThat(newHandle.enforcedPredicate().isAll()).isFalse();
         assertThat(newHandle.enforcedPredicate().getDomains().orElseThrow()).containsKey(eventDateColumn);
 
-        // Remaining filter should NOT include event_date (it's enforced)
-        assertThat(result.get().getRemainingFilter().isAll()).isTrue();
+        // Temporal transform pruning is partial; engine must still verify the original predicate.
+        assertThat(newHandle.unenforcedPredicate().isAll()).isFalse();
+        assertThat(result.get().getRemainingFilter().isAll()).isFalse();
     }
 
     @Test
@@ -491,8 +492,8 @@ public class TestDucklakePartitionPruning
         List<DucklakePartitionSpec> specs = catalog.getPartitionSpecs(
                 dailyPartitionedTable.tableId(), snapshotId);
 
-        assertThat(specs).isNotEmpty();
-        DucklakePartitionSpec spec = specs.get(0);
+        assertThat(specs).hasSize(1);
+        DucklakePartitionSpec spec = specs.getFirst();
         assertThat(spec.fields()).hasSize(3);
         assertThat(spec.fields().get(0).transform()).isEqualTo(DucklakePartitionTransform.YEAR);
         assertThat(spec.fields().get(1).transform()).isEqualTo(DucklakePartitionTransform.MONTH);
@@ -505,7 +506,7 @@ public class TestDucklakePartitionPruning
         Map<Long, List<DucklakeFilePartitionValue>> values = catalog.getFilePartitionValues(
                 dailyPartitionedTable.tableId(), snapshotId);
 
-        assertThat(values).isNotEmpty();
+        assertThat(values).hasSize(4);
         // Each file should have 3 partition values (year + month + day)
         for (List<DucklakeFilePartitionValue> fileValues : values.values()) {
             assertThat(fileValues).hasSize(3);

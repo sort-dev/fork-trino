@@ -112,7 +112,7 @@ public class TestDucklakeSplitManager
         List<DucklakeSplit> matchingSplits = getSplits(tableHandle, matchingConstraint);
         List<DucklakeSplit> nonMatchingSplits = getSplits(tableHandle, nonMatchingConstraint);
 
-        assertThat(matchingSplits).isNotEmpty();
+        assertThat(matchingSplits).hasSize(catalog.getDataFiles(table.tableId(), snapshotId).size());
         assertThat(nonMatchingSplits).isEmpty();
     }
 
@@ -137,7 +137,7 @@ public class TestDucklakeSplitManager
         List<DucklakeSplit> matchingSplits = getSplits(tableHandle, matchingConstraint);
         List<DucklakeSplit> nonMatchingSplits = getSplits(tableHandle, nonMatchingConstraint);
 
-        assertThat(matchingSplits).isNotEmpty();
+        assertThat(matchingSplits).hasSize(catalog.getDataFiles(table.tableId(), snapshotId).size());
         assertThat(nonMatchingSplits).isEmpty();
     }
 
@@ -156,7 +156,7 @@ public class TestDucklakeSplitManager
 
         List<DucklakeSplit> splits = getSplits(tableHandle, constraint);
 
-        assertThat(splits).isNotEmpty();
+        assertThat(splits).hasSize(catalog.getDataFiles(table.tableId(), snapshotId).size());
         assertThat(splits)
                 .allSatisfy(split -> assertThat(split.fileStatisticsDomain()).isEqualTo(expectedDomain));
     }
@@ -171,7 +171,7 @@ public class TestDucklakeSplitManager
 
         List<DucklakeSplit> splits = getSplits(tableHandle, Constraint.alwaysTrue());
 
-        assertThat(splits).isNotEmpty();
+        assertThat(splits).hasSize(catalog.getDataFiles(table.tableId(), snapshotId).size());
         assertThat(splits)
                 .allSatisfy(split -> assertThat(split.fileStatisticsDomain().isAll()).isTrue());
     }
@@ -202,7 +202,7 @@ public class TestDucklakeSplitManager
         DucklakeTableHandle tableHandle = new DucklakeTableHandle("test_schema", "simple_table", table.tableId(), snapshotId);
 
         List<ConnectorSplit> splits = getRawSplits(tableHandle, Constraint.alwaysTrue());
-        assertThat(splits).isNotEmpty();
+        assertThat(splits).hasSize(catalog.getDataFiles(table.tableId(), snapshotId).size());
         assertThat(splits).allSatisfy(split -> assertThat(split).isInstanceOf(DucklakeSplit.class));
     }
 

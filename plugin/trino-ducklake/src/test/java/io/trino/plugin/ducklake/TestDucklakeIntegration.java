@@ -416,8 +416,7 @@ public class TestDucklakeIntegration
     @Test
     public void testNullableTableNullFiltering()
     {
-        // Rows 1 and 3 have non-null name, price, active, created_date
-        // But only row 1 has all non-null values including tags
+        // Rows 1 and 3 have non-null name, price, active, created_date, and tags.
         MaterializedResult result = computeActual(
                 "SELECT id FROM nullable_table " +
                         "WHERE name IS NOT NULL AND price IS NOT NULL AND active IS NOT NULL " +
@@ -638,7 +637,7 @@ public class TestDucklakeIntegration
     {
         MaterializedResult result = computeActual(
                 "SELECT count(*) FROM temporal_partitioned_table WHERE event_date = DATE '2023-06-10'");
-        assertThat((Long) result.getMaterializedRows().get(0).getField(0)).isGreaterThanOrEqualTo(1L);
+        assertThat(result.getMaterializedRows().get(0).getField(0)).isEqualTo(1L);
     }
 
     @Test
