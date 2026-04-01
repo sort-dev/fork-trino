@@ -59,7 +59,6 @@ public class TestDucklakePartitionPruning
     public static void setUpClass()
             throws Exception
     {
-        DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
         config = DucklakeTestCatalogEnvironment.createDucklakeConfig();
         catalog = new JdbcDucklakeCatalog(config);
         snapshotId = catalog.getCurrentSnapshotId();

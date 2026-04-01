@@ -15,6 +15,7 @@ package io.trino.plugin.ducklake;
 
 import com.google.inject.Inject;
 import com.google.inject.Provider;
+import io.trino.plugin.ducklake.catalog.DuckDbDucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.PostgreSqlDucklakeCatalog;
@@ -38,15 +39,34 @@ public class DucklakeCatalogProvider
     public DucklakeCatalog get()
     {
         String databaseUrl = requireNonNull(config.getCatalogDatabaseUrl(), "ducklake.catalog.database-url is null");
-        String normalizedUrl = databaseUrl.toLowerCase(ENGLISH);
+        return switch (catalogTypeForUrl(databaseUrl)) {
+            case SQLITE -> new SqliteDucklakeCatalog(config);
+            case POSTGRESQL -> new PostgreSqlDucklakeCatalog(config);
+            case DUCKDB -> new DuckDbDucklakeCatalog(config);
+            case GENERIC_JDBC -> new JdbcDucklakeCatalog(config);
+        };
+    }
 
+    static CatalogType catalogTypeForUrl(String databaseUrl)
+    {
+        String normalizedUrl = databaseUrl.toLowerCase(ENGLISH);
         if (normalizedUrl.startsWith("jdbc:sqlite:")) {
-            return new SqliteDucklakeCatalog(config);
+            return CatalogType.SQLITE;
         }
         if (normalizedUrl.startsWith("jdbc:postgresql:")) {
-            return new PostgreSqlDucklakeCatalog(config);
+            return CatalogType.POSTGRESQL;
         }
+        if (normalizedUrl.startsWith("jdbc:duckdb:")) {
+            return CatalogType.DUCKDB;
+        }
+        return CatalogType.GENERIC_JDBC;
+    }
 
-        return new JdbcDucklakeCatalog(config);
+    enum CatalogType
+    {
+        SQLITE,
+        POSTGRESQL,
+        DUCKDB,
+        GENERIC_JDBC,
     }
 }

@@ -15,7 +15,6 @@ package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableMap;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 
@@ -24,44 +23,49 @@ import static java.util.Objects.requireNonNull;
 public final class DucklakeTestCatalogEnvironment
 {
     private static final Object LOCK = new Object();
-    private static final Path SQLITE_CATALOG_PATH = Path.of("target/test-catalog/catalog.db");
-    private static final Path SQLITE_DATA_PATH = SQLITE_CATALOG_PATH.getParent().resolve("data");
 
     private static volatile TestingDucklakePostgreSqlCatalogServer postgreSqlServer;
     private static volatile RuntimeException postgreSqlBackendUnavailable;
+
+    private static volatile boolean sqliteCatalogGenerated;
+    private static volatile boolean postgreSqlCatalogGenerated;
+    private static volatile boolean duckDbCatalogGenerated;
 
     private DucklakeTestCatalogEnvironment() {}
 
     public static Path ensureSqliteCatalog()
             throws Exception
     {
-        if (!Files.exists(SQLITE_CATALOG_PATH)) {
-            synchronized (LOCK) {
-                if (!Files.exists(SQLITE_CATALOG_PATH)) {
-                    DucklakeCatalogGenerator.generateTestCatalog();
-                }
-            }
-        }
-        return SQLITE_CATALOG_PATH;
+        ensureSqliteCatalogGenerated();
+        return DucklakeCatalogGenerator.getSqliteCatalogPath();
     }
 
     public static DucklakeConfig createDucklakeConfig()
             throws Exception
     {
         DucklakeTestCatalogBackend backend = DucklakeTestCatalogBackend.current();
-        Path sqliteCatalogPath = ensureSqliteCatalog();
 
         DucklakeConfig config = new DucklakeConfig()
-                .setDataPath(SQLITE_DATA_PATH.toAbsolutePath().toString())
                 .setMaxCatalogConnections(5);
 
         switch (backend) {
-            case SQLITE -> config.setCatalogDatabaseUrl("jdbc:sqlite:" + sqliteCatalogPath.toAbsolutePath());
+            case SQLITE -> {
+                Path sqliteCatalogPath = ensureSqliteCatalog();
+                config.setCatalogDatabaseUrl("jdbc:sqlite:" + sqliteCatalogPath.toAbsolutePath());
+                config.setDataPath(DucklakeCatalogGenerator.getSqliteCatalogDirectory().resolve("data").toAbsolutePath().toString());
+            }
             case POSTGRESQL -> {
-                TestingDucklakePostgreSqlCatalogServer server = getPostgreSqlServer(sqliteCatalogPath);
+                TestingDucklakePostgreSqlCatalogServer server = getPostgreSqlServer();
+                ensurePostgreSqlCatalogGenerated(server);
                 config.setCatalogDatabaseUrl(server.getJdbcUrl());
                 config.setCatalogDatabaseUser(server.getUser());
                 config.setCatalogDatabasePassword(server.getPassword());
+                config.setDataPath(DucklakeCatalogGenerator.getPostgreSqlCatalogDirectory().resolve("data").toAbsolutePath().toString());
+            }
+            case DUCKDB -> {
+                Path duckDbCatalogPath = ensureDuckDbCatalog();
+                config.setCatalogDatabaseUrl("jdbc:duckdb:" + duckDbCatalogPath.toAbsolutePath());
+                config.setDataPath(DucklakeCatalogGenerator.getDuckDbCatalogDirectory().resolve("data").toAbsolutePath().toString());
             }
         }
 
@@ -91,7 +95,47 @@ public final class DucklakeTestCatalogEnvironment
         return DucklakeTestCatalogBackend.current();
     }
 
-    private static TestingDucklakePostgreSqlCatalogServer getPostgreSqlServer(Path sqliteCatalogPath)
+    private static void ensureSqliteCatalogGenerated()
+            throws Exception
+    {
+        if (!sqliteCatalogGenerated) {
+            synchronized (LOCK) {
+                if (!sqliteCatalogGenerated) {
+                    DucklakeCatalogGenerator.generateSqliteCatalog();
+                    sqliteCatalogGenerated = true;
+                }
+            }
+        }
+    }
+
+    private static Path ensureDuckDbCatalog()
+            throws Exception
+    {
+        if (!duckDbCatalogGenerated) {
+            synchronized (LOCK) {
+                if (!duckDbCatalogGenerated) {
+                    DucklakeCatalogGenerator.generateDuckDbCatalog(DucklakeCatalogGenerator.getDuckDbCatalogPath());
+                    duckDbCatalogGenerated = true;
+                }
+            }
+        }
+        return DucklakeCatalogGenerator.getDuckDbCatalogPath();
+    }
+
+    private static void ensurePostgreSqlCatalogGenerated(TestingDucklakePostgreSqlCatalogServer server)
+            throws Exception
+    {
+        if (!postgreSqlCatalogGenerated) {
+            synchronized (LOCK) {
+                if (!postgreSqlCatalogGenerated) {
+                    DucklakeCatalogGenerator.generatePostgreSqlCatalog(server);
+                    postgreSqlCatalogGenerated = true;
+                }
+            }
+        }
+    }
+
+    private static TestingDucklakePostgreSqlCatalogServer getPostgreSqlServer()
             throws Exception
     {
         RuntimeException backendUnavailable = postgreSqlBackendUnavailable;
@@ -105,7 +149,7 @@ public final class DucklakeTestCatalogEnvironment
                 server = postgreSqlServer;
                 if (server == null) {
                     try {
-                        server = new TestingDucklakePostgreSqlCatalogServer(sqliteCatalogPath);
+                        server = new TestingDucklakePostgreSqlCatalogServer();
                         postgreSqlServer = server;
                         Runtime.getRuntime().addShutdownHook(new Thread(server::close));
                     }

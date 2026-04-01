@@ -35,7 +35,7 @@ public class DucklakeConfig
     }
 
     @Config("ducklake.catalog.database-url")
-    @ConfigDescription("JDBC URL for the Ducklake catalog database (e.g., jdbc:sqlite:/path/to/catalog.db or jdbc:postgresql://host/db)")
+    @ConfigDescription("JDBC URL for the Ducklake catalog database (e.g., jdbc:sqlite:/path/to/catalog.db, jdbc:postgresql://host/db, or jdbc:duckdb:/path/to/catalog.ducklake)")
     public DucklakeConfig setCatalogDatabaseUrl(String catalogDatabaseUrl)
     {
         this.catalogDatabaseUrl = catalogDatabaseUrl;
@@ -48,7 +48,7 @@ public class DucklakeConfig
     }
 
     @Config("ducklake.catalog.database-user")
-    @ConfigDescription("Username for the catalog database (optional for SQLite)")
+    @ConfigDescription("Username for the catalog database (optional for SQLite and local DuckDB files)")
     public DucklakeConfig setCatalogDatabaseUser(String catalogDatabaseUser)
     {
         this.catalogDatabaseUser = catalogDatabaseUser;
@@ -61,7 +61,7 @@ public class DucklakeConfig
     }
 
     @Config("ducklake.catalog.database-password")
-    @ConfigDescription("Password for the catalog database (optional for SQLite)")
+    @ConfigDescription("Password for the catalog database (optional for SQLite and local DuckDB files)")
     public DucklakeConfig setCatalogDatabasePassword(String catalogDatabasePassword)
     {
         this.catalogDatabasePassword = catalogDatabasePassword;

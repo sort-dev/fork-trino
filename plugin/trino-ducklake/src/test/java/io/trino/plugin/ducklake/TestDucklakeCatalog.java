@@ -23,7 +23,6 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.statistics.ColumnStatistics;
 import io.trino.spi.statistics.DoubleRange;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -39,13 +38,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestDucklakeCatalog
 {
     private DucklakeCatalog catalog;
-
-    @BeforeAll
-    public static void setUpClass()
-            throws Exception
-    {
-        DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
-    }
 
     @BeforeEach
     public void setUp()

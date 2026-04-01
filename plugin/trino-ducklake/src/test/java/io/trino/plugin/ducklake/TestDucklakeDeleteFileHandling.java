@@ -53,11 +53,13 @@ public class TestDucklakeDeleteFileHandling
     public static void setUpClass()
             throws Exception
     {
-        sourceCatalogPath = DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
+        if (DucklakeTestCatalogEnvironment.currentBackend() == DucklakeTestCatalogBackend.SQLITE) {
+            sourceCatalogPath = DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
+        }
     }
 
     @Test
-    @DisabledIfSystemProperty(named = "ducklake.test.catalog-backend", matches = "(?i)(postgres|postgresql)")
+    @DisabledIfSystemProperty(named = "ducklake.test.catalog-backend", matches = "(?i)(postgres|postgresql|duckdb)")
     public void testDeleteFileSuppressesRows()
             throws Exception
     {

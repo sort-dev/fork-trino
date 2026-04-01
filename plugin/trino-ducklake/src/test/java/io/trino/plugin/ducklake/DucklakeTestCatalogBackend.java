@@ -18,7 +18,8 @@ import static java.util.Locale.ENGLISH;
 public enum DucklakeTestCatalogBackend
 {
     SQLITE,
-    POSTGRESQL;
+    POSTGRESQL,
+    DUCKDB;
 
     private static final String BACKEND_PROPERTY = "ducklake.test.catalog-backend";
 
@@ -28,7 +29,8 @@ public enum DucklakeTestCatalogBackend
         return switch (value.toLowerCase(ENGLISH)) {
             case "sqlite" -> SQLITE;
             case "postgres", "postgresql" -> POSTGRESQL;
-            default -> throw new IllegalArgumentException("Unsupported catalog backend: " + value + ". Allowed values: sqlite, postgresql");
+            case "duckdb" -> DUCKDB;
+            default -> throw new IllegalArgumentException("Unsupported catalog backend: " + value + ". Allowed values: sqlite, postgresql, duckdb");
         };
     }
 }

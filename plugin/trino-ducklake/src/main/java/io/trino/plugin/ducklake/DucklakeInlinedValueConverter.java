@@ -25,6 +25,7 @@ import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -71,20 +72,20 @@ public final class DucklakeInlinedValueConverter
             return toMicros(jdbcValue);
         }
         if (trinoType instanceof VarcharType) {
-            return Slices.utf8Slice(jdbcValue.toString());
+            return Slices.utf8Slice(toStringValue(jdbcValue));
         }
         if (trinoType instanceof VarbinaryType) {
             if (jdbcValue instanceof byte[] bytes) {
                 return Slices.wrappedBuffer(bytes);
             }
-            return Slices.wrappedBuffer(jdbcValue.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return Slices.wrappedBuffer(toStringValue(jdbcValue).getBytes(StandardCharsets.UTF_8));
         }
         if (trinoType instanceof DecimalType decimalType) {
             return toDecimal(jdbcValue, decimalType);
         }
 
         // Fallback: try as string for any remaining types
-        return Slices.utf8Slice(jdbcValue.toString());
+        return Slices.utf8Slice(toStringValue(jdbcValue));
     }
 
     private static Boolean toBoolean(Object value)
@@ -95,7 +96,7 @@ public final class DucklakeInlinedValueConverter
         if (value instanceof Number n) {
             return n.intValue() != 0;
         }
-        return Boolean.parseBoolean(value.toString());
+        return Boolean.parseBoolean(toStringValue(value));
     }
 
     private static long toLong(Object value)
@@ -103,7 +104,7 @@ public final class DucklakeInlinedValueConverter
         if (value instanceof Number n) {
             return n.longValue();
         }
-        return Long.parseLong(value.toString());
+        return Long.parseLong(toStringValue(value));
     }
 
     private static float toFloat(Object value)
@@ -111,7 +112,7 @@ public final class DucklakeInlinedValueConverter
         if (value instanceof Number n) {
             return n.floatValue();
         }
-        return Float.parseFloat(value.toString());
+        return Float.parseFloat(toStringValue(value));
     }
 
     private static double toDouble(Object value)
@@ -119,7 +120,7 @@ public final class DucklakeInlinedValueConverter
         if (value instanceof Number n) {
             return n.doubleValue();
         }
-        return Double.parseDouble(value.toString());
+        return Double.parseDouble(toStringValue(value));
     }
 
     private static long toEpochDays(Object value)
@@ -128,7 +129,7 @@ public final class DucklakeInlinedValueConverter
             return n.longValue();
         }
         // SQLite may store dates as ISO strings
-        return LocalDate.parse(value.toString()).toEpochDay();
+        return LocalDate.parse(toStringValue(value)).toEpochDay();
     }
 
     private static long toMicros(Object value)
@@ -137,7 +138,7 @@ public final class DucklakeInlinedValueConverter
             return n.longValue();
         }
         // Parse ISO timestamp string to micros since epoch
-        String str = value.toString();
+        String str = toStringValue(value);
         java.time.LocalDateTime ldt = java.time.LocalDateTime.parse(str.replace(" ", "T"));
         return ldt.toEpochSecond(java.time.ZoneOffset.UTC) * 1_000_000 + ldt.getNano() / 1_000;
     }
@@ -149,7 +150,7 @@ public final class DucklakeInlinedValueConverter
             decimal = bd;
         }
         else {
-            decimal = new BigDecimal(value.toString());
+            decimal = new BigDecimal(toStringValue(value));
         }
         decimal = decimal.setScale(decimalType.getScale(), java.math.RoundingMode.HALF_UP);
 
@@ -157,5 +158,13 @@ public final class DucklakeInlinedValueConverter
             return decimal.unscaledValue().longValueExact();
         }
         return Int128.valueOf(decimal.unscaledValue());
+    }
+
+    private static String toStringValue(Object value)
+    {
+        if (value instanceof byte[] bytes) {
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
+        return value.toString();
     }
 }

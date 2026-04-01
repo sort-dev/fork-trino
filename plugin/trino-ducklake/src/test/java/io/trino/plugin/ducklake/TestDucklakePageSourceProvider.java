@@ -37,7 +37,6 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -58,13 +57,6 @@ public class TestDucklakePageSourceProvider
     private DucklakeCatalog catalog;
     private DucklakeSplitManager splitManager;
     private DucklakePageSourceProvider pageSourceProvider;
-
-    @BeforeAll
-    public static void setUpClass()
-            throws Exception
-    {
-        DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
-    }
 
     @BeforeEach
     public void setUp()

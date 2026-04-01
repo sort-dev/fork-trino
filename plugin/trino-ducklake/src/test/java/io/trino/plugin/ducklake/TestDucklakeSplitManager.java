@@ -26,7 +26,6 @@ import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -43,13 +42,6 @@ public class TestDucklakeSplitManager
 {
     private DucklakeCatalog catalog;
     private DucklakeSplitManager splitManager;
-
-    @BeforeAll
-    public static void setUpClass()
-            throws Exception
-    {
-        DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
-    }
 
     @BeforeEach
     public void setUp()

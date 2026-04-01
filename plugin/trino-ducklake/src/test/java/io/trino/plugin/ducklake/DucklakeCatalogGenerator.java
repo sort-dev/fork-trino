@@ -18,15 +18,19 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
+import java.util.List;
 
 /**
  * Utility to generate a test Ducklake catalog using DuckDB's embedded JDBC driver.
- * This creates the SQLite catalog database and Parquet data files that the connector reads.
+ * This creates backend-specific Ducklake catalog metadata and Parquet data files
+ * by writing through DuckDB + Ducklake extension.
  */
 public final class DucklakeCatalogGenerator
 {
     private static final Path TARGET_DIR = Path.of("target");
-    private static final Path CATALOG_DIR = TARGET_DIR.resolve("test-catalog");
+    private static final Path SQLITE_CATALOG_DIR = TARGET_DIR.resolve("test-catalog-sqlite");
+    private static final Path POSTGRESQL_CATALOG_DIR = TARGET_DIR.resolve("test-catalog-postgresql");
+    private static final Path DUCKDB_CATALOG_DIR = TARGET_DIR.resolve("test-catalog-duckdb");
     private static final Path TEMP_DB = TARGET_DIR.resolve("temp-setup.duckdb");
 
     private DucklakeCatalogGenerator() {}
@@ -34,24 +38,95 @@ public final class DucklakeCatalogGenerator
     public static void main(String[] args)
             throws Exception
     {
-        generateTestCatalog();
+        String backend = System.getProperty("ducklake.test.catalog-backend", "sqlite");
+        switch (backend.trim().toLowerCase(java.util.Locale.ENGLISH)) {
+            case "sqlite" -> generateSqliteCatalog();
+            case "duckdb" -> generateDuckDbCatalog(DUCKDB_CATALOG_DIR.resolve("catalog.ducklake"));
+            default -> throw new IllegalArgumentException("Unsupported standalone generator backend: " + backend + ". Supported: sqlite, duckdb");
+        }
     }
 
-    public static void generateTestCatalog()
+    public static Path getSqliteCatalogDirectory()
+    {
+        return SQLITE_CATALOG_DIR;
+    }
+
+    public static Path getPostgreSqlCatalogDirectory()
+    {
+        return POSTGRESQL_CATALOG_DIR;
+    }
+
+    public static Path getDuckDbCatalogDirectory()
+    {
+        return DUCKDB_CATALOG_DIR;
+    }
+
+    public static Path getSqliteCatalogPath()
+    {
+        return SQLITE_CATALOG_DIR.resolve("catalog.db");
+    }
+
+    public static Path getDuckDbCatalogPath()
+    {
+        return DUCKDB_CATALOG_DIR.resolve("catalog.ducklake");
+    }
+
+    public static void generateSqliteCatalog()
+            throws Exception
+    {
+        Path catalogPath = getSqliteCatalogPath().toAbsolutePath();
+        generateTestCatalog(
+                "sqlite",
+                SQLITE_CATALOG_DIR,
+                "ducklake:sqlite:" + catalogPath,
+                List.of("sqlite"),
+                "catalog database: " + catalogPath);
+    }
+
+    public static void generateDuckDbCatalog(Path catalogPath)
+            throws Exception
+    {
+        Path absoluteCatalogPath = catalogPath.toAbsolutePath();
+        generateTestCatalog(
+                "duckdb",
+                DUCKDB_CATALOG_DIR,
+                "ducklake:" + absoluteCatalogPath,
+                List.of(),
+                "catalog database: " + absoluteCatalogPath);
+    }
+
+    public static void generatePostgreSqlCatalog(TestingDucklakePostgreSqlCatalogServer server)
+            throws Exception
+    {
+        generateTestCatalog(
+                "postgresql",
+                POSTGRESQL_CATALOG_DIR,
+                server.getDuckDbAttachUri(),
+                List.of("postgres"),
+                "catalog database: " + server.getJdbcUrl());
+    }
+
+    private static void generateTestCatalog(
+            String backendName,
+            Path catalogDirectory,
+            String ducklakeAttachUri,
+            List<String> extraExtensions,
+            String catalogDescription)
             throws Exception
     {
         System.out.println("==========================================");
         System.out.println("Ducklake Test Catalog Generator");
         System.out.println("==========================================");
+        System.out.println("Backend: " + backendName);
         System.out.println();
 
         // Create target directory
         Files.createDirectories(TARGET_DIR);
 
         // Remove old catalog if exists
-        if (Files.exists(CATALOG_DIR)) {
+        if (Files.exists(catalogDirectory)) {
             System.out.println("Removing existing test catalog...");
-            deleteDirectory(CATALOG_DIR);
+            deleteDirectory(catalogDirectory);
         }
 
         // Remove old temp DB if exists
@@ -61,31 +136,30 @@ public final class DucklakeCatalogGenerator
         System.out.println();
 
         // Create catalog directory and data directory
-        Files.createDirectories(CATALOG_DIR);
-        Path dataDir = CATALOG_DIR.resolve("data");
+        Files.createDirectories(catalogDirectory);
+        Path dataDir = catalogDirectory.resolve("data");
         Files.createDirectories(dataDir);
-
-        String catalogDbPath = CATALOG_DIR.resolve("catalog.db").toAbsolutePath().toString();
 
         // Connect to DuckDB in-memory
         String jdbcUrl = "jdbc:duckdb:";
-
         try (Connection conn = DriverManager.getConnection(jdbcUrl);
                 Statement stmt = conn.createStatement()) {
             // Install and load extensions
             System.out.println("Installing extensions...");
             stmt.execute("INSTALL ducklake");
-            stmt.execute("INSTALL sqlite");
+            for (String extension : extraExtensions) {
+                stmt.execute("INSTALL " + extension);
+            }
             System.out.println("Loading extensions...");
             stmt.execute("LOAD ducklake");
-            stmt.execute("LOAD sqlite");
+            for (String extension : extraExtensions) {
+                stmt.execute("LOAD " + extension);
+            }
 
-            // Attach Ducklake catalog pointing to SQLite DB
+            // Attach Ducklake catalog
             System.out.println("Attaching Ducklake catalog...");
-            stmt.execute(String.format(
-                    "ATTACH 'ducklake:sqlite:%s' AS ducklake_db (DATA_PATH '%s')",
-                    catalogDbPath,
-                    dataDir.toAbsolutePath()));
+            String attachSql = "ATTACH '" + escapeSql(ducklakeAttachUri) + "' AS ducklake_db (DATA_PATH '" + escapeSql(dataDir.toAbsolutePath().toString()) + "')";
+            stmt.execute(attachSql);
 
             // Create test schema in Ducklake
             System.out.println("Creating test schema...");
@@ -403,7 +477,6 @@ public final class DucklakeCatalogGenerator
 
             // Flush before delete so data is in Parquet files
             stmt.execute("CALL ducklake_flush_inlined_data('ducklake_db')");
-
             System.out.println("Deleting rows from deleted_rows_table...");
             stmt.execute("DELETE FROM ducklake_db.test_schema.deleted_rows_table WHERE name = 'delete'");
 
@@ -465,10 +538,7 @@ public final class DucklakeCatalogGenerator
             // CHECKPOINT and DETACH flush inlined data to Parquet, so inlined tables
             // must be created in a separate attach cycle with no checkpoint before detach.
             System.out.println("Re-attaching catalog for inlined table creation...");
-            stmt.execute(String.format(
-                    "ATTACH 'ducklake:sqlite:%s' AS ducklake_db (DATA_PATH '%s')",
-                    catalogDbPath,
-                    dataDir.toAbsolutePath()));
+            stmt.execute(attachSql);
 
             // Table 15: Inlined data table (data stays in SQLite, not flushed to Parquet)
             System.out.println("Creating inlined_table (data stays inlined in metadata catalog)...");
@@ -511,8 +581,8 @@ public final class DucklakeCatalogGenerator
             System.out.println();
             System.out.println("✓ Test catalog created successfully!");
             System.out.println();
-            System.out.println("Catalog location: " + CATALOG_DIR.toAbsolutePath());
-            System.out.println("Catalog database: " + catalogDbPath);
+            System.out.println("Catalog location: " + catalogDirectory.toAbsolutePath());
+            System.out.println(catalogDescription);
             System.out.println("Data directory: " + dataDir.toAbsolutePath());
             System.out.println();
             System.out.println("Tables created:");
@@ -554,5 +624,10 @@ public final class DucklakeCatalogGenerator
                         }
                     });
         }
+    }
+
+    private static String escapeSql(String value)
+    {
+        return value.replace("'", "''");
     }
 }
