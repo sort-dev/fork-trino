@@ -19,9 +19,9 @@ import io.airlift.log.Logger;
 import io.airlift.slice.Slices;
 import io.trino.filesystem.Location;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
+import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
 import io.trino.plugin.ducklake.catalog.DucklakeFilePartitionValue;
-import io.trino.plugin.ducklake.catalog.DucklakeInlinedDataInfo;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionField;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionSpec;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionTransform;
@@ -29,6 +29,7 @@ import io.trino.plugin.ducklake.catalog.DucklakeSchema;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
@@ -101,40 +102,69 @@ public class DucklakeSplitManager
 
         log.debug("Found %d data files for table %s", dataFiles.size(), tableHandle.tableName());
 
-        // If no data files exist at all, check for inlined data in the metadata catalog.
-        // Only check when the raw (unpruned) file list is empty — this means the table
-        // genuinely has no Parquet files, not that pruning eliminated them.
-        if (dataFiles.isEmpty()) {
-            Optional<DucklakeInlinedDataInfo> inlinedInfo = catalog.getInlinedDataInfo(
-                    tableHandle.tableId(), tableHandle.snapshotId());
-            if (inlinedInfo.isPresent()) {
-                DucklakeInlinedDataInfo info = inlinedInfo.get();
-                log.debug("Found inlined data for table %s (tableId=%d, schemaVersion=%d)",
-                        tableHandle.tableName(), info.tableId(), info.schemaVersion());
-                return new FixedSplitSource(List.of(new DucklakeInlinedSplit(
-                        info.tableId(), info.schemaVersion(), tableHandle.snapshotId())));
-            }
+        boolean hasParquetFiles = !dataFiles.isEmpty();
+        Optional<DucklakeInlinedSplit> inlinedSplit = catalog.getInlinedDataInfo(
+                        tableHandle.tableId(), tableHandle.snapshotId())
+                .filter(info -> shouldIncludeInlinedSplit(tableHandle, info.schemaVersion(), hasParquetFiles))
+                .map(info -> {
+                    log.debug("Found inlined data for table %s (tableId=%d, schemaVersion=%d)",
+                            tableHandle.tableName(), info.tableId(), info.schemaVersion());
+                    return new DucklakeInlinedSplit(info.tableId(), info.schemaVersion(), tableHandle.snapshotId());
+                });
+
+        List<DucklakeSplit> parquetSplits = List.of();
+        if (!dataFiles.isEmpty()) {
+            DucklakeTable tableMetadata = catalog.getTableById(tableHandle.tableId(), tableHandle.snapshotId())
+                    .orElseThrow(() -> new IllegalStateException("Table metadata missing for table ID: " + tableHandle.tableId()));
+            DucklakeSchema schemaMetadata = catalog.getSchema(tableHandle.schemaName(), tableHandle.snapshotId())
+                    .orElseThrow(() -> new IllegalStateException("Schema metadata missing for schema: " + tableHandle.schemaName()));
+            String tableDataPath = resolveTableDataPath(schemaMetadata, tableMetadata);
+
+            TupleDomain<DucklakeColumnHandle> fileStatisticsDomain = buildFileStatisticsDomain(constraint)
+                    .intersect(tableHandle.unenforcedPredicate());
+            dataFiles = pruneDataFiles(dataFiles, tableHandle, constraint);
+            dataFiles = pruneByPartitionValues(dataFiles, tableHandle);
+
+            parquetSplits = dataFiles.stream()
+                    .map(dataFile -> createSplit(dataFile, tableDataPath, fileStatisticsDomain))
+                    .collect(toImmutableList());
         }
 
-        DucklakeTable tableMetadata = catalog.getTableById(tableHandle.tableId(), tableHandle.snapshotId())
-                .orElseThrow(() -> new IllegalStateException("Table metadata missing for table ID: " + tableHandle.tableId()));
-        DucklakeSchema schemaMetadata = catalog.getSchema(tableHandle.schemaName(), tableHandle.snapshotId())
-                .orElseThrow(() -> new IllegalStateException("Schema metadata missing for schema: " + tableHandle.schemaName()));
-        String tableDataPath = resolveTableDataPath(schemaMetadata, tableMetadata);
+        if (parquetSplits.isEmpty() && inlinedSplit.isEmpty()) {
+            log.debug("No data files or inlined data found for table %s", tableHandle.tableName());
+            return new FixedSplitSource(List.of());
+        }
 
-        TupleDomain<DucklakeColumnHandle> fileStatisticsDomain = buildFileStatisticsDomain(constraint)
-                .intersect(tableHandle.unenforcedPredicate());
-        dataFiles = pruneDataFiles(dataFiles, tableHandle, constraint);
-        dataFiles = pruneByPartitionValues(dataFiles, tableHandle);
+        List<ConnectorSplit> allSplits = new ArrayList<>(parquetSplits.size() + (inlinedSplit.isPresent() ? 1 : 0));
+        allSplits.addAll(parquetSplits);
+        inlinedSplit.ifPresent(allSplits::add);
 
-        // Convert data files to splits
-        List<DucklakeSplit> splits = dataFiles.stream()
-                .map(dataFile -> createSplit(dataFile, tableDataPath, fileStatisticsDomain))
-                .collect(toImmutableList());
+        log.debug("Created %d splits for table %s (%d parquet, %d inlined)",
+                allSplits.size(),
+                tableHandle.tableName(),
+                parquetSplits.size(),
+                inlinedSplit.isPresent() ? 1 : 0);
 
-        log.debug("Created %d splits for table %s", splits.size(), tableHandle.tableName());
+        return new FixedSplitSource(allSplits);
+    }
 
-        return new FixedSplitSource(splits);
+    private boolean shouldIncludeInlinedSplit(DucklakeTableHandle tableHandle, long schemaVersion, boolean hasParquetFiles)
+    {
+        if (!hasParquetFiles) {
+            return true;
+        }
+
+        List<DucklakeColumn> tableColumns = catalog.getTableColumns(tableHandle.tableId(), tableHandle.snapshotId());
+        if (tableColumns.isEmpty()) {
+            return false;
+        }
+
+        List<List<Object>> probeRows = catalog.readInlinedData(
+                tableHandle.tableId(),
+                schemaVersion,
+                tableHandle.snapshotId(),
+                List.of(tableColumns.getFirst()));
+        return !probeRows.isEmpty();
     }
 
     private List<DucklakeDataFile> pruneDataFiles(List<DucklakeDataFile> dataFiles, DucklakeTableHandle tableHandle, Constraint constraint)

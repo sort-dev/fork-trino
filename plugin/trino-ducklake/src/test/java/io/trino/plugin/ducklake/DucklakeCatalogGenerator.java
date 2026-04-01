@@ -574,6 +574,33 @@ public final class DucklakeCatalogGenerator
                         (3, NULL, 30.0)
                     """);
 
+            // Table 17: Mixed inlined + Parquet table in the same snapshot
+            System.out.println("Creating mixed_inline_table (inlined + Parquet in same snapshot)...");
+            stmt.execute("""
+                    CREATE TABLE ducklake_db.test_schema.mixed_inline_table (
+                        id INTEGER,
+                        source VARCHAR,
+                        value DOUBLE
+                    )
+                    """);
+            stmt.execute("CALL ducklake_db.set_option('data_inlining_row_limit', 3, schema => 'test_schema', table_name => 'mixed_inline_table')");
+
+            // 2 rows <= limit -> inlined
+            stmt.execute("""
+                    INSERT INTO ducklake_db.test_schema.mixed_inline_table VALUES
+                        (1, 'inlined', 11.0),
+                        (2, 'inlined', 22.0)
+                    """);
+            // 5 rows > limit -> Parquet file
+            stmt.execute("""
+                    INSERT INTO ducklake_db.test_schema.mixed_inline_table VALUES
+                        (100, 'parquet', 100.0),
+                        (101, 'parquet', 101.0),
+                        (102, 'parquet', 102.0),
+                        (103, 'parquet', 103.0),
+                        (104, 'parquet', 104.0)
+                    """);
+
             // Detach WITHOUT checkpoint — inlined data stays in SQLite metadata
             System.out.println("Detaching catalog (no checkpoint — inlined data preserved)...");
             stmt.execute("DETACH ducklake_db");
@@ -602,6 +629,7 @@ public final class DucklakeCatalogGenerator
             System.out.println("  - test_schema.multi_file_table (5 rows across 3 Parquet files, multi-file scan)");
             System.out.println("  - test_schema.inlined_table (3 rows, data inlined in metadata catalog)");
             System.out.println("  - test_schema.inlined_nullable_table (3 rows, inlined data with NULLs)");
+            System.out.println("  - test_schema.mixed_inline_table (7 rows, 2 inlined + 5 Parquet in same snapshot)");
         }
 
         System.out.println();

@@ -47,8 +47,10 @@ DuckDB's ducklake extension writes literal calendar values (e.g., year=2023, mon
 ### Time travel
 `FOR SYSTEM_TIME AS OF` / `FOR SYSTEM_VERSION AS OF` are not implemented. The connector always reads the latest snapshot.
 
-### Data inlining — read support only
-Trino can read inlined data, but only for the simple case: tables with no Parquet files where all data is inlined. If a table has both inlined data AND Parquet files (possible during a partial flush), only the Parquet files are read. This covers the common case (small tables that were never flushed) but not the mixed case. The mixed case is rare in practice — DuckLake's flush operation is atomic.
+### Data inlining
+Trino now supports mixed-mode reads when a snapshot has both active Parquet files and active inlined rows: split planning emits both split types and reads them as a union. Merge-on-read delete filtering remains in place for Parquet splits, while inlined row visibility is still governed by `begin_snapshot`/`end_snapshot` filtering in metadata reads.
+
+Stale inlined metadata pointers remain non-fatal. If metadata references an inlined table that is missing or has no active rows at the snapshot, the connector does not fail and does not emit dead inlined splits for mixed Parquet scans.
 
 ### Degraded type semantics
 `json`, `variant`, and geometry types are stored as VARCHAR/VARBINARY. No type-specific functions or operators. Variant shredding is not implemented.

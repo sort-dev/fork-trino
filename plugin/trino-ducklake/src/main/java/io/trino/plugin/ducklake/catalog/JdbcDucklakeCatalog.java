@@ -659,10 +659,23 @@ public class JdbcDucklakeCatalog
 
             try (ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
+                    long resolvedTableId = rs.getLong("table_id");
+                    long schemaVersion = rs.getLong("schema_version");
+                    String inlinedTableName = String.format("ducklake_inlined_data_%d_%d", resolvedTableId, schemaVersion);
+                    try (PreparedStatement verifyStmt = conn.prepareStatement("SELECT 1 FROM " + inlinedTableName + " WHERE 1 = 0")) {
+                        verifyStmt.executeQuery();
+                    }
+                    catch (SQLException e) {
+                        // Catalog metadata can point to a dropped/non-materialized inlined table.
+                        // Treat this as "no inlined data" so scan planning does not emit a dead split.
+                        log.debug("Inlined data table %s not available for table %d: %s", inlinedTableName, tableId, e.getMessage());
+                        return Optional.empty();
+                    }
+
                     return Optional.of(new DucklakeInlinedDataInfo(
-                            rs.getLong("table_id"),
+                            resolvedTableId,
                             rs.getString("table_name"),
-                            rs.getLong("schema_version")));
+                            schemaVersion));
                 }
                 return Optional.empty();
             }

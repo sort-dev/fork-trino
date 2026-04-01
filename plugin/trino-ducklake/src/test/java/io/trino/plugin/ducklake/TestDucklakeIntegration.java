@@ -40,6 +40,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   empty_table (0 rows)              — empty result set testing
  *   schema_evolution_table (4 rows)    — column added after initial write
  *   aggregation_table (30 rows)        — category A/B/C, amount, quantity
+ *   inlined_table (3 rows)             — rows stored in metadata catalog
+ *   inlined_nullable_table (3 rows)    — inlined rows with NULL handling
+ *   mixed_inline_table (7 rows)        — 2 inlined rows + 5 parquet rows
  */
 public class TestDucklakeIntegration
         extends AbstractTestQueryFramework
@@ -73,7 +76,8 @@ public class TestDucklakeIntegration
                 .contains("simple_table", "array_table", "partitioned_table",
                         "temporal_partitioned_table", "daily_partitioned_table", "nested_table",
                         "wide_types_table", "nullable_table", "empty_table",
-                        "schema_evolution_table", "aggregation_table");
+                        "schema_evolution_table", "aggregation_table",
+                        "inlined_table", "inlined_nullable_table", "mixed_inline_table");
     }
 
     @Test
@@ -1373,5 +1377,21 @@ public class TestDucklakeIntegration
         MaterializedResult result = computeActual(
                 "SELECT a.name, b.name FROM inlined_table a JOIN inlined_table b ON a.id = b.id ORDER BY a.id");
         assertThat(result.getRowCount()).isEqualTo(3);
+    }
+
+    @Test
+    public void testMixedInlineTableCount()
+    {
+        assertQuery("SELECT COUNT(*) FROM mixed_inline_table", "VALUES 7");
+    }
+
+    @Test
+    public void testMixedInlineTableIncludesInlinedAndParquetRows()
+    {
+        assertQuery(
+                "SELECT source, COUNT(*) FROM mixed_inline_table GROUP BY source ORDER BY source",
+                "VALUES ('inlined', 2), ('parquet', 5)");
+        assertQuery("SELECT COUNT(*) FROM mixed_inline_table WHERE id < 10", "VALUES 2");
+        assertQuery("SELECT COUNT(*) FROM mixed_inline_table WHERE id >= 100", "VALUES 5");
     }
 }

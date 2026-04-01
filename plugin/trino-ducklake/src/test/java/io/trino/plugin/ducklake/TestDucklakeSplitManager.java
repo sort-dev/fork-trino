@@ -210,6 +210,37 @@ public class TestDucklakeSplitManager
         assertThat(rows).isEmpty();
     }
 
+    @Test
+    public void testGetSplitsReturnsParquetAndInlinedSplitsForMixedTable()
+            throws Exception
+    {
+        long snapshotId = catalog.getCurrentSnapshotId();
+        DucklakeTable table = getTable("test_schema", "mixed_inline_table", snapshotId);
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle("test_schema", "mixed_inline_table", table.tableId(), snapshotId);
+
+        List<ConnectorSplit> splits = getRawSplits(tableHandle, Constraint.alwaysTrue());
+        long parquetSplitCount = splits.stream().filter(DucklakeSplit.class::isInstance).count();
+        long inlinedSplitCount = splits.stream().filter(DucklakeInlinedSplit.class::isInstance).count();
+
+        assertThat(parquetSplitCount).isEqualTo(catalog.getDataFiles(table.tableId(), snapshotId).size());
+        assertThat(parquetSplitCount).isGreaterThan(0);
+        assertThat(inlinedSplitCount).isEqualTo(1);
+    }
+
+    @Test
+    public void testSplitStorageModesAreIntentionalForRepresentativeTables()
+            throws Exception
+    {
+        long snapshotId = catalog.getCurrentSnapshotId();
+
+        assertSplitStorageMode(snapshotId, "simple_table", true, false);
+        assertSplitStorageMode(snapshotId, "multi_file_table", true, false);
+        assertSplitStorageMode(snapshotId, "inlined_table", false, true);
+        assertSplitStorageMode(snapshotId, "inlined_nullable_table", false, true);
+        assertSplitStorageMode(snapshotId, "mixed_inline_table", true, true);
+        assertSplitStorageMode(snapshotId, "empty_table", false, true);
+    }
+
     private List<DucklakeSplit> getSplits(DucklakeTableHandle tableHandle, Constraint constraint)
             throws Exception
     {
@@ -259,5 +290,29 @@ public class TestDucklakeSplitManager
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("Missing column: " + columnName))
                 .columnId();
+    }
+
+    private void assertSplitStorageMode(long snapshotId, String tableName, boolean expectParquetSplit, boolean expectInlinedSplit)
+            throws Exception
+    {
+        DucklakeTable table = getTable("test_schema", tableName, snapshotId);
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle("test_schema", tableName, table.tableId(), snapshotId);
+        List<ConnectorSplit> splits = getRawSplits(tableHandle, Constraint.alwaysTrue());
+        long parquetSplits = splits.stream().filter(DucklakeSplit.class::isInstance).count();
+        long inlinedSplits = splits.stream().filter(DucklakeInlinedSplit.class::isInstance).count();
+
+        if (expectParquetSplit) {
+            assertThat(parquetSplits).as("parquet split count for %s", tableName).isGreaterThan(0);
+        }
+        else {
+            assertThat(parquetSplits).as("parquet split count for %s", tableName).isZero();
+        }
+
+        if (expectInlinedSplit) {
+            assertThat(inlinedSplits).as("inlined split count for %s", tableName).isGreaterThan(0);
+        }
+        else {
+            assertThat(inlinedSplits).as("inlined split count for %s", tableName).isZero();
+        }
     }
 }

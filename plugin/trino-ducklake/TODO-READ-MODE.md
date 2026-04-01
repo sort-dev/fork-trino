@@ -117,10 +117,10 @@ Same precedence rule: query `AS OF` > session pin > catalog pin > current snapsh
 
 ## R1: Mixed Inlined + Parquet Union Read (Correctness First)
 
-- [ ] Change split planning to emit both Parquet splits and inlined splits when both are present in the same snapshot.
-- [ ] Preserve correctness with delete filtering and row-id semantics.
-- [ ] Add regression tests for mixed-state snapshots (inlined rows + data files simultaneously visible).
-- [ ] Keep fallback behavior for stale inlined pointers (missing `ducklake_inlined_data_*` table) as non-fatal.
+- [x] Change split planning to emit both Parquet splits and inlined splits when both are present in the same snapshot.
+- [x] Preserve correctness with delete filtering and row-id semantics.
+- [x] Add regression tests for mixed-state snapshots (inlined rows + data files simultaneously visible).
+- [x] Keep fallback behavior for stale inlined pointers (missing `ducklake_inlined_data_*` table) as non-fatal.
 
 ## R2: Table Version Support
 
