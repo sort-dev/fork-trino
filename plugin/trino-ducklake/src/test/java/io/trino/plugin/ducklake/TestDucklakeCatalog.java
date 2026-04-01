@@ -18,7 +18,7 @@ import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeColumnStats;
 import io.trino.plugin.ducklake.catalog.DucklakeSchema;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
-import io.trino.plugin.ducklake.catalog.SqliteDucklakeCatalog;
+import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.statistics.ColumnStatistics;
 import io.trino.spi.statistics.DoubleRange;
@@ -27,8 +27,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
@@ -36,41 +34,24 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Tests for Ducklake catalog reading from DuckDB-generated SQLite database.
+ * Tests for Ducklake catalog reading from DuckDB-generated test metadata.
  */
 public class TestDucklakeCatalog
 {
-    private static Path catalogPath;
     private DucklakeCatalog catalog;
 
     @BeforeAll
     public static void setUpClass()
             throws Exception
     {
-        // Look for test catalog
-        catalogPath = Path.of("target/test-catalog/catalog.db");
-
-        // Generate test catalog once for all tests
-        if (!Files.exists(catalogPath)) {
-            synchronized (DucklakeCatalogGenerator.class) {
-                if (!Files.exists(catalogPath)) {
-                    System.out.println("Test catalog not found, generating with DuckDB...");
-                    DucklakeCatalogGenerator.generateTestCatalog();
-                }
-            }
-        }
+        DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
     }
 
     @BeforeEach
     public void setUp()
+            throws Exception
     {
-        // Create catalog instance for each test
-        DucklakeConfig config = new DucklakeConfig();
-        config.setCatalogDatabaseUrl("jdbc:sqlite:" + catalogPath.toAbsolutePath());
-        config.setDataPath(catalogPath.getParent().toAbsolutePath().toString());
-        config.setMaxCatalogConnections(5);
-
-        catalog = new SqliteDucklakeCatalog(config);
+        catalog = new JdbcDucklakeCatalog(DucklakeTestCatalogEnvironment.createDucklakeConfig());
     }
 
     @AfterEach

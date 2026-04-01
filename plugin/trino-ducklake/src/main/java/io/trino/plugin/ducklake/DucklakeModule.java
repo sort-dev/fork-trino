@@ -21,7 +21,6 @@ import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitManager;
 import io.trino.plugin.base.classloader.ForClassLoaderSafe;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
-import io.trino.plugin.ducklake.catalog.SqliteDucklakeCatalog;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.spi.connector.ConnectorPageSourceProviderFactory;
 import io.trino.spi.connector.ConnectorSplitManager;
@@ -48,7 +47,7 @@ public class DucklakeModule
         binder.bind(DucklakeMetadataFactory.class).in(Scopes.SINGLETON);
 
         // Catalog
-        binder.bind(DucklakeCatalog.class).to(SqliteDucklakeCatalog.class).in(Scopes.SINGLETON);
+        binder.bind(DucklakeCatalog.class).toProvider(DucklakeCatalogProvider.class).in(Scopes.SINGLETON);
 
         // File system factory
         binder.bind(DucklakeFileSystemFactory.class).to(DefaultDucklakeFileSystemFactory.class).in(Scopes.SINGLETON);

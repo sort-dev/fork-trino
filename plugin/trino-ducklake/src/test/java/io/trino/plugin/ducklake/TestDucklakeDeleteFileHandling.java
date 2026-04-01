@@ -29,6 +29,7 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -52,17 +53,11 @@ public class TestDucklakeDeleteFileHandling
     public static void setUpClass()
             throws Exception
     {
-        sourceCatalogPath = Path.of("target/test-catalog/catalog.db");
-        if (!Files.exists(sourceCatalogPath)) {
-            synchronized (DucklakeCatalogGenerator.class) {
-                if (!Files.exists(sourceCatalogPath)) {
-                    DucklakeCatalogGenerator.generateTestCatalog();
-                }
-            }
-        }
+        sourceCatalogPath = DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
     }
 
     @Test
+    @DisabledIfSystemProperty(named = "ducklake.test.catalog-backend", matches = "(?i)(postgres|postgresql)")
     public void testDeleteFileSuppressesRows()
             throws Exception
     {

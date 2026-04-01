@@ -17,13 +17,13 @@ import com.google.inject.Inject;
 import io.trino.plugin.ducklake.DucklakeConfig;
 
 /**
- * SQLite-specific Ducklake catalog.
+ * PostgreSQL-specific Ducklake catalog.
  */
-public class SqliteDucklakeCatalog
+public class PostgreSqlDucklakeCatalog
         extends JdbcDucklakeCatalog
 {
     @Inject
-    public SqliteDucklakeCatalog(DucklakeConfig config)
+    public PostgreSqlDucklakeCatalog(DucklakeConfig config)
     {
         super(config);
     }

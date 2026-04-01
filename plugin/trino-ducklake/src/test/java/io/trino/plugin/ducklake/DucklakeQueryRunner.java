@@ -18,8 +18,6 @@ import io.airlift.log.Logger;
 import io.airlift.log.Logging;
 import io.trino.testing.DistributedQueryRunner;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.Map;
 
 import static io.airlift.testing.Closeables.closeAllSuppress;
@@ -61,20 +59,9 @@ public final class DucklakeQueryRunner
         {
             DistributedQueryRunner queryRunner = super.build();
             try {
-                // Generate test catalog with DuckDB if not already present
-                Path catalogPath = Path.of("target/test-catalog/catalog.db");
-                if (!Files.exists(catalogPath)) {
-                    synchronized (DucklakeCatalogGenerator.class) {
-                        if (!Files.exists(catalogPath)) {
-                            DucklakeCatalogGenerator.generateTestCatalog();
-                        }
-                    }
-                }
-
                 // Build connector properties
                 Map<String, String> properties = ImmutableMap.<String, String>builder()
-                        .put("ducklake.catalog.database-url", "jdbc:sqlite:" + catalogPath.toAbsolutePath())
-                        .put("ducklake.data-path", catalogPath.getParent().toAbsolutePath().toString())
+                        .putAll(DucklakeTestCatalogEnvironment.getConnectorProperties())
                         .put("fs.hadoop.enabled", "true")
                         .putAll(connectorProperties.buildOrThrow())
                         .buildOrThrow();

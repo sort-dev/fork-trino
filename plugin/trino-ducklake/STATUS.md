@@ -7,7 +7,7 @@ Last updated: 2026-04-01
 The read path is fully implemented and tested.
 
 ### Data Access
-- Catalog reads from Ducklake SQL metadata tables (SQLite via JDBC/HikariCP).
+- Catalog reads from Ducklake SQL metadata tables (JDBC/HikariCP, validated with SQLite and PostgreSQL backends).
 - Snapshot-scoped reads of current snapshot.
 - Parquet data files read through Trino's native Parquet reader.
 - Inlined data read directly from the metadata catalog (DuckLake's default for tables with <=10 rows).
@@ -30,10 +30,14 @@ The read path is fully implemented and tested.
   These types are readable but lack type-specific operators and functions.
 
 ### Test Coverage
-- 173 tests, 0 failures across 7 test classes.
-- `TestDucklakeIntegration`: 125 end-to-end SQL tests via `DucklakeQueryRunner`.
+- 197 tests, 0 failures across 7 test classes.
+- `TestDucklakeIntegration`: 136 end-to-end SQL tests via `DucklakeQueryRunner`.
 - 15 test tables covering primitives, arrays, structs, maps, partitioning (identity/temporal/daily), schema evolution, NULLs, empty tables, delete files, multi-file scans, complex NULL patterns, and inlined data.
 - Unit tests for catalog, split manager, partition pruning, page source provider, delete file handling, plugin wiring.
+- Test backend matrix:
+  - Default: SQLite (`mvn test`)
+  - PostgreSQL: `mvn test -Dducklake.test.catalog-backend=postgresql` (uses Testcontainers, requires Docker)
+  - `TestDucklakeDeleteFileHandling` is SQLite-only because it edits SQLite catalog files directly.
 
 ## Known Gaps and Concerns
 
@@ -50,7 +54,7 @@ Trino can read inlined data, but only for the simple case: tables with no Parque
 `json`, `variant`, and geometry types are stored as VARCHAR/VARBINARY. No type-specific functions or operators. Variant shredding is not implemented.
 
 ### Catalog backend
-Only SQLite is tested. DuckDB-as-catalog-backend and PostgreSQL-as-catalog-backend are not tested, though they should work via JDBC with minor catalog URL changes.
+Catalog implementation now routes by JDBC URL (`jdbc:sqlite:` / `jdbc:postgresql:`) with a shared JDBC code path. SQLite and PostgreSQL are both covered by tests. DuckDB-as-catalog-backend remains unverified.
 
 ## Write Side — Not Implemented
 

@@ -19,7 +19,7 @@ import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeSchema;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
-import io.trino.plugin.ducklake.catalog.SqliteDucklakeCatalog;
+import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ColumnHandle;
@@ -41,7 +41,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -56,8 +55,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDucklakePageSourceProvider
 {
-    private static Path catalogPath;
-
     private DucklakeCatalog catalog;
     private DucklakeSplitManager splitManager;
     private DucklakePageSourceProvider pageSourceProvider;
@@ -66,25 +63,16 @@ public class TestDucklakePageSourceProvider
     public static void setUpClass()
             throws Exception
     {
-        catalogPath = Path.of("target/test-catalog/catalog.db");
-        if (!Files.exists(catalogPath)) {
-            synchronized (DucklakeCatalogGenerator.class) {
-                if (!Files.exists(catalogPath)) {
-                    DucklakeCatalogGenerator.generateTestCatalog();
-                }
-            }
-        }
+        DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
     }
 
     @BeforeEach
     public void setUp()
+            throws Exception
     {
-        DucklakeConfig config = new DucklakeConfig();
-        config.setCatalogDatabaseUrl("jdbc:sqlite:" + catalogPath.toAbsolutePath());
-        config.setDataPath(catalogPath.getParent().toAbsolutePath().toString());
-        config.setMaxCatalogConnections(5);
+        DucklakeConfig config = DucklakeTestCatalogEnvironment.createDucklakeConfig();
 
-        catalog = new SqliteDucklakeCatalog(config);
+        catalog = new JdbcDucklakeCatalog(config);
         splitManager = new DucklakeSplitManager(catalog, config);
         pageSourceProvider = new DucklakePageSourceProvider(
                 new LocalFileSystemFactory(Path.of("/")),

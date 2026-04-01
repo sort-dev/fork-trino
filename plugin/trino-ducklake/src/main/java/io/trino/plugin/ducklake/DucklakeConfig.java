@@ -35,7 +35,7 @@ public class DucklakeConfig
     }
 
     @Config("ducklake.catalog.database-url")
-    @ConfigDescription("JDBC URL for the Ducklake catalog database (e.g., jdbc:sqlite:/path/to/catalog.db)")
+    @ConfigDescription("JDBC URL for the Ducklake catalog database (e.g., jdbc:sqlite:/path/to/catalog.db or jdbc:postgresql://host/db)")
     public DucklakeConfig setCatalogDatabaseUrl(String catalogDatabaseUrl)
     {
         this.catalogDatabaseUrl = catalogDatabaseUrl;

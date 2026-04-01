@@ -22,7 +22,7 @@ import io.trino.plugin.ducklake.catalog.DucklakePartitionSpec;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionTransform;
 import io.trino.plugin.ducklake.catalog.DucklakeSchema;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
-import io.trino.plugin.ducklake.catalog.SqliteDucklakeCatalog;
+import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitSource;
@@ -36,8 +36,6 @@ import io.trino.spi.type.RowType;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -61,21 +59,9 @@ public class TestDucklakePartitionPruning
     public static void setUpClass()
             throws Exception
     {
-        Path catalogPath = Path.of("target/test-catalog/catalog.db");
-        if (!Files.exists(catalogPath)) {
-            synchronized (DucklakeCatalogGenerator.class) {
-                if (!Files.exists(catalogPath)) {
-                    DucklakeCatalogGenerator.generateTestCatalog();
-                }
-            }
-        }
-
-        config = new DucklakeConfig();
-        config.setCatalogDatabaseUrl("jdbc:sqlite:" + catalogPath.toAbsolutePath());
-        config.setDataPath(catalogPath.getParent().resolve("data").toAbsolutePath().toString());
-        config.setMaxCatalogConnections(5);
-
-        catalog = new SqliteDucklakeCatalog(config);
+        DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
+        config = DucklakeTestCatalogEnvironment.createDucklakeConfig();
+        catalog = new JdbcDucklakeCatalog(config);
         snapshotId = catalog.getCurrentSnapshotId();
 
         DucklakeSchema schema = catalog.listSchemas(snapshotId).stream()
