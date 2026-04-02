@@ -31,6 +31,35 @@ This plan is intentionally reuse-heavy: reuse existing Trino writer infrastructu
 8. `MERGE`
 9. `ALTER TABLE` family (add/drop/rename column, partition evolution)
 
+### First Write Item: Views (Read + Write Together)
+
+Views are the simplest write operation — just catalog metadata, no parquet files, partitions, or schema evolution. Good entry point for proving out the write path before tackling data writes.
+
+**Read side** (also in TODO-READ-MODE.md R7):
+- Implement `listViews`, `getView`, `isView`, `getViews` in `DucklakeMetadata`
+- Add `DucklakeView` model class, catalog query methods
+- Filter by `dialect`: only expose views with Trino-compatible SQL (dialect = 'trino' or 'sql')
+- DuckDB-dialect views are skipped with a log warning (future: transpiler)
+
+**Write side**:
+- Implement `createView` in `DucklakeMetadata`:
+  - Store SQL with `dialect = 'trino'`
+  - INSERT into `ducklake_view` with `begin_snapshot` = new snapshot, `end_snapshot` = NULL
+  - Create new snapshot row + snapshot_changes entry (`created_view:<view_name>`)
+- Implement `dropView`:
+  - SET `end_snapshot` on existing view row
+  - New snapshot + changes entry (`dropped_view:<view_name>`)
+- Implement `renameView` (optional, lower priority)
+
+**Why views first**:
+- No file writing, no partition logic, no stats — pure catalog metadata mutation
+- Exercises the snapshot commit path (read current → create next → write changes)
+- Tests the write transaction abstraction from M0
+- Immediately useful — views in DuckLake are a real user feature
+- Read + write can be implemented and tested together as one unit
+
+**Depends on**: M0 (catalog write transaction abstraction) — but views are simple enough that M0 can be scoped to just what views need.
+
 ## Trino Write SQL/API Surface (Proposed)
 
 ## Core SQL (P0/P1)

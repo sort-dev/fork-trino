@@ -213,6 +213,93 @@ Run for each catalog backend: `sqlite`, `duckdb`, `postgresql`.
 
 Total required interoperability scenarios remain aligned with write plan matrix (9 baseline combos, then feature overlays).
 
+## R7: View Support (Read + Write Pair)
+
+**Note**: Views are the first write-side item. Read and write should be implemented together. See also TODO-WRITE-MODE.md "First Write Item: Views" section.
+
+DuckLake stores views in the `ducklake_view` catalog table with full snapshot-scoped visibility. Views created in DuckDB are currently invisible to Trino because the connector has zero view implementation.
+
+### Current State
+
+- **DuckLake catalog schema**: `ducklake_view` table exists with columns: `view_id`, `view_uuid`, `begin_snapshot`, `end_snapshot`, `schema_id`, `view_name`, `dialect`, `sql`, `column_aliases`
+- **Trino connector**: No view methods in `DucklakeCatalog` interface, `JdbcDucklakeCatalog`, or `DucklakeMetadata`. The `ConnectorMetadata` default implementations return empty/throw NOT_SUPPORTED.
+- **DuckDB behavior**: Views are created via standard `CREATE VIEW`, stored with `dialect` field (e.g., "duckdb"), and support time-travel (begin/end snapshot scoping).
+
+### Implementation Plan (Read-Only MVP)
+
+**1. Model class**: Create `DucklakeView` record with fields: `viewId`, `viewUuid`, `viewName`, `schemaId`, `sql`, `dialect`, `columnAliases`.
+
+**2. Catalog interface** — add to `DucklakeCatalog`:
+```java
+List<DucklakeView> listViews(long schemaId, long snapshotId);
+Optional<DucklakeView> getView(String schemaName, String viewName, long snapshotId);
+```
+
+**3. JDBC implementation** — add to `JdbcDucklakeCatalog`:
+```sql
+SELECT view_id, view_uuid, view_name, dialect, sql, column_aliases
+FROM ducklake_view
+WHERE schema_id = ?
+  AND ? >= begin_snapshot
+  AND (? < end_snapshot OR end_snapshot IS NULL)
+```
+
+**4. Metadata methods** — implement in `DucklakeMetadata`:
+- `listViews(session, schemaName)` → query catalog, return `List<SchemaTableName>`
+- `getView(session, viewName)` → return `Optional<ConnectorViewDefinition>`
+- `isView(session, viewName)` → delegate to `getView`
+- `getViews(session, schemaName)` → bulk version of `getView`
+
+**5. SQL dialect challenge**: DuckLake stores the SQL body with a `dialect` field (typically "duckdb"). Options:
+- **Option A (simplest)**: Return the SQL as-is via `ConnectorViewDefinition.getOriginalSql()`. Trino will attempt to parse it — DuckDB SQL is mostly compatible but may fail on DuckDB-specific syntax.
+- **Option B (robust)**: Only expose views where `dialect = 'trino'` or `dialect = 'sql'`. Log a warning for DuckDB-dialect views. When Trino write support is added, store views with `dialect = 'trino'`.
+- **Option C (advanced)**: Implement a DuckDB→Trino SQL transpiler for common patterns. Defer this — scope is large and error-prone.
+- **Recommended**: Start with Option B. Views created by DuckDB with DuckDB-specific syntax (e.g., `STRUCT` literals, `LIST` functions) will not parse in Trino anyway. Expose only compatible views, and when we add `CREATE VIEW` in write mode, store as Trino dialect.
+
+**6. Column aliases**: The `column_aliases` field may contain column name remapping. Map these to `ConnectorViewDefinition.ViewColumn` entries.
+
+**7. Write operations (deferred to write mode)**:
+- `createView` / `dropView` / `renameView` — defer until write support
+- `setViewComment` / `setViewColumnComment` — defer
+
+### Future: Cross-Dialect View Transpilation (Research Item)
+
+Instead of filtering out DuckDB-dialect views, transpile them to Trino SQL at read time. This would allow Trino to expose all DuckLake views regardless of which engine created them.
+
+**Architecture**: Rust-based SQL transpiler → compile to WASM → load in JVM via pure-Java WASM runtime → call `transpile(sql, from="duckdb", to="trino")` per view access.
+
+**Transpiler candidates** (need research/evaluation):
+- **sqlglot (Python)**: https://github.com/tobymao/sqlglot — most mature (25+ dialects), but Python embedding in JVM is impractical for a Trino plugin
+- **sqlglot-rust (crates.io) / sql-glot-rust (Protegrity)**: https://github.com/protegrity/sql-glot-rust — similar Rust port, v0.9.24
+- **polyglot-sql**: https://github.com/tobilg/polyglot — Rust, very early stage
+
+**WASM-on-JVM runtime**:
+- **Chicory**: https://github.com/dylibso/chicory — pure Java WASM interpreter, no native dependencies, works in any JVM. Right choice for Trino plugins (classloader isolation, no JNI). Performance is fine for transpiling a single SQL string per view access (plan time, not hot path).
+- GraalVM WASM and wasmtime-java/wasmer-java are alternatives but require native code or specific JVM, which Trino plugins can't guarantee.
+
+**Configuration**: Add a catalog property like `ducklake.view-dialect-transpilation=duckdb` (or a list: `duckdb,spark`) that enables transpilation for those dialects. Default: disabled (only Trino-dialect views exposed). When enabled, views with matching dialect are transpiled before being returned to the planner.
+
+**Risks to evaluate**:
+- Transpilation correctness — a bug silently changes query semantics
+- Rust port maturity vs Python original — DuckDB-specific syntax coverage
+- WASM binary as a shipped dependency — versioning and update story
+- Error handling — what happens when transpilation fails (fallback to skip? surface error?)
+
+**Status**: Research item. Assign someone to evaluate sqlglot-rust / sql-glot-rust DuckDB→Trino transpilation quality against real DuckLake views.
+
+### Reference: Iceberg's approach
+
+Iceberg connector implements all view methods by delegating to `catalog.listViews()` / `catalog.getView()` / `catalog.createView()`. It also handles unsupported view dialects with a custom error code (`ICEBERG_UNSUPPORTED_VIEW_DIALECT`). Similar pattern applies here.
+
+### Test Plan
+
+- [ ] Add DuckDB-created views to `DucklakeCatalogGenerator` (at least one simple view and one with column aliases)
+- [ ] Test `listViews` returns views from catalog
+- [ ] Test `getView` returns `ConnectorViewDefinition` with correct SQL and columns
+- [ ] Test view snapshot scoping (view visible at snapshot N but not N-1)
+- [ ] Test dialect filtering (DuckDB-dialect views handled gracefully)
+- [ ] Test views across all catalog backends (SQLite, PostgreSQL, DuckDB)
+
 ## Definition of Done (Read Mode)
 
 - [ ] `FOR VERSION AS OF` and `FOR TIMESTAMP AS OF` implemented and tested across all 3 catalog backends.
