@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.ducklake;
 
+import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorMetadata;
@@ -22,7 +23,10 @@ import io.trino.spi.connector.ConnectorPageSourceProviderFactory;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.session.PropertyMetadata;
 import io.trino.spi.transaction.IsolationLevel;
+
+import java.util.List;
 
 import static io.trino.spi.transaction.IsolationLevel.SERIALIZABLE;
 import static io.trino.spi.transaction.IsolationLevel.checkConnectorSupports;
@@ -39,18 +43,21 @@ public class DucklakeConnector
     private final DucklakeTransactionManager transactionManager;
     private final ConnectorSplitManager splitManager;
     private final ConnectorPageSourceProviderFactory pageSourceProviderFactory;
+    private final List<PropertyMetadata<?>> sessionProperties;
 
     @Inject
     public DucklakeConnector(
             LifeCycleManager lifeCycleManager,
             DucklakeTransactionManager transactionManager,
             ConnectorSplitManager splitManager,
-            ConnectorPageSourceProviderFactory pageSourceProviderFactory)
+            ConnectorPageSourceProviderFactory pageSourceProviderFactory,
+            DucklakeSessionProperties ducklakeSessionProperties)
     {
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.pageSourceProviderFactory = requireNonNull(pageSourceProviderFactory, "pageSourceProviderFactory is null");
+        this.sessionProperties = ImmutableList.copyOf(requireNonNull(ducklakeSessionProperties, "ducklakeSessionProperties is null").getSessionProperties());
     }
 
     @Override
@@ -70,6 +77,12 @@ public class DucklakeConnector
     public ConnectorPageSourceProviderFactory getPageSourceProviderFactory()
     {
         return pageSourceProviderFactory;
+    }
+
+    @Override
+    public List<PropertyMetadata<?>> getSessionProperties()
+    {
+        return sessionProperties;
     }
 
     @Override

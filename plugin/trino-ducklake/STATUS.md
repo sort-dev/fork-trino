@@ -8,7 +8,7 @@ The read path is fully implemented and tested.
 
 ### Data Access
 - Catalog reads from Ducklake SQL metadata tables (JDBC/HikariCP, validated with SQLite and PostgreSQL backends).
-- Snapshot-scoped reads of current snapshot.
+- Snapshot-scoped reads of current snapshot, with optional session/catalog pinning.
 - Parquet data files read through Trino's native Parquet reader.
 - Inlined data read directly from the metadata catalog (DuckLake's default for tables with <=10 rows).
 - Merge-on-read delete file filtering.
@@ -45,7 +45,8 @@ The read path is fully implemented and tested.
 DuckDB's ducklake extension writes literal calendar values (e.g., year=2023, month=6) to `ducklake_file_partition_value` instead of the epoch-based values described in the spec (e.g., year=53, month=641). Our implementation follows DuckDB's actual behavior. If the spec is updated or DuckDB changes behavior in a future release, this code will need reconciliation. See [REPORT_DUCKLAKE_PARTITION_PROB.md](REPORT_DUCKLAKE_PARTITION_PROB.md) and [duckdb/ducklake-web#312](https://github.com/duckdb/ducklake-web/issues/312).
 
 ### Time travel
-`FOR SYSTEM_TIME AS OF` / `FOR SYSTEM_VERSION AS OF` are not implemented. The connector always reads the latest snapshot.
+`FOR SYSTEM_TIME AS OF` / `FOR SYSTEM_VERSION AS OF` are not implemented yet. Table-version query arguments are rejected.
+Session/catalog snapshot pinning is implemented (`ducklake.read_snapshot_id`, `ducklake.read_snapshot_timestamp`, `ducklake.default-snapshot-id`, `ducklake.default-snapshot-timestamp`). Snapshot resolver precedence is `query > session > catalog > current`, with query-level wiring still pending table-version support.
 
 ### Data inlining
 Trino now supports mixed-mode reads when a snapshot has both active Parquet files and active inlined rows: split planning emits both split types and reads them as a union. Merge-on-read delete filtering remains in place for Parquet splits, while inlined row visibility is still governed by `begin_snapshot`/`end_snapshot` filtering in metadata reads.

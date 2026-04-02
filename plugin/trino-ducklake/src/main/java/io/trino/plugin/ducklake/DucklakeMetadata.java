@@ -24,6 +24,7 @@ import io.trino.plugin.ducklake.catalog.DucklakePartitionSpec;
 import io.trino.plugin.ducklake.catalog.DucklakeSchema;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
 import io.trino.plugin.ducklake.catalog.DucklakeTableStats;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorMetadata;
@@ -50,6 +51,7 @@ import java.util.OptionalLong;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -70,17 +72,24 @@ public class DucklakeMetadata
 {
     private final DucklakeCatalog catalog;
     private final DucklakeTypeConverter typeConverter;
+    private final DucklakeSnapshotResolver snapshotResolver;
 
     public DucklakeMetadata(DucklakeCatalog catalog, DucklakeTypeConverter typeConverter)
     {
+        this(catalog, typeConverter, new DucklakeSnapshotResolver(catalog, OptionalLong.empty(), Optional.empty()));
+    }
+
+    public DucklakeMetadata(DucklakeCatalog catalog, DucklakeTypeConverter typeConverter, DucklakeSnapshotResolver snapshotResolver)
+    {
         this.catalog = requireNonNull(catalog, "catalog is null");
         this.typeConverter = requireNonNull(typeConverter, "typeConverter is null");
+        this.snapshotResolver = requireNonNull(snapshotResolver, "snapshotResolver is null");
     }
 
     @Override
     public List<String> listSchemaNames(ConnectorSession session)
     {
-        long snapshotId = catalog.getCurrentSnapshotId();
+        long snapshotId = snapshotResolver.resolveSnapshotId(session);
         return catalog.listSchemas(snapshotId).stream()
                 .map(DucklakeSchema::schemaName)
                 .collect(toImmutableList());
@@ -95,9 +104,11 @@ public class DucklakeMetadata
     {
         requireNonNull(tableName, "tableName is null");
 
-        // Get snapshot ID (current or from version if time travel is requested)
-        long snapshotId = catalog.getCurrentSnapshotId();
-        // TODO: Handle startVersion for time travel queries
+        if (startVersion.isPresent() || endVersion.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "DuckLake time-travel queries are not implemented yet");
+        }
+
+        long snapshotId = snapshotResolver.resolveSnapshotId(session);
 
         Optional<DucklakeTable> table = catalog.getTable(tableName, snapshotId);
         if (table.isEmpty()) {
@@ -136,7 +147,7 @@ public class DucklakeMetadata
     @Override
     public List<SchemaTableName> listTables(ConnectorSession session, Optional<String> schemaName)
     {
-        long snapshotId = catalog.getCurrentSnapshotId();
+        long snapshotId = snapshotResolver.resolveSnapshotId(session);
 
         if (schemaName.isPresent()) {
             Optional<DucklakeSchema> schema = catalog.getSchema(schemaName.get(), snapshotId);

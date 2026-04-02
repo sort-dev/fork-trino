@@ -15,6 +15,7 @@ package io.trino.plugin.ducklake.catalog;
 
 import io.trino.spi.connector.SchemaTableName;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -34,6 +35,11 @@ public interface DucklakeCatalog
      * Get a specific snapshot ID (for time travel queries)
      */
     Optional<DucklakeSnapshot> getSnapshot(long snapshotId);
+
+    /**
+     * Get the latest snapshot with snapshot_time <= timestamp.
+     */
+    Optional<DucklakeSnapshot> getSnapshotAtOrBefore(Instant timestamp);
 
     /**
      * List all schemas visible at the given snapshot

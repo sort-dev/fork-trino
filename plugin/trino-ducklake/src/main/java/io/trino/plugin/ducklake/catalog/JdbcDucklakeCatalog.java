@@ -26,6 +26,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -103,18 +105,38 @@ public class JdbcDucklakeCatalog
 
             try (ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
-                    return Optional.of(new DucklakeSnapshot(
-                            rs.getLong("snapshot_id"),
-                            rs.getTimestamp("snapshot_time").toInstant(),
-                            rs.getLong("schema_version"),
-                            rs.getLong("next_catalog_id"),
-                            rs.getLong("next_file_id")));
+                    return Optional.of(readSnapshot(rs));
                 }
                 return Optional.empty();
             }
         }
         catch (SQLException e) {
             throw new RuntimeException("Failed to get snapshot: " + snapshotId, e);
+        }
+    }
+
+    @Override
+    public Optional<DucklakeSnapshot> getSnapshotAtOrBefore(Instant timestamp)
+    {
+        String sql = "SELECT snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id " +
+                     "FROM ducklake_snapshot " +
+                     "WHERE snapshot_time <= ? " +
+                     "ORDER BY snapshot_time DESC, snapshot_id DESC " +
+                     "LIMIT 1";
+
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setTimestamp(1, Timestamp.from(timestamp));
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return Optional.of(readSnapshot(rs));
+                }
+                return Optional.empty();
+            }
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Failed to get snapshot at or before timestamp: " + timestamp, e);
         }
     }
 
@@ -775,6 +797,17 @@ public class JdbcDucklakeCatalog
     {
         boolean value = rs.getBoolean(columnName);
         return rs.wasNull() ? Optional.empty() : Optional.of(value);
+    }
+
+    private DucklakeSnapshot readSnapshot(ResultSet rs)
+            throws SQLException
+    {
+        return new DucklakeSnapshot(
+                rs.getLong("snapshot_id"),
+                rs.getTimestamp("snapshot_time").toInstant(),
+                rs.getLong("schema_version"),
+                rs.getLong("next_catalog_id"),
+                rs.getLong("next_file_id"));
     }
 
     private String resolveColumnType(DucklakeColumn column, Map<Long, List<DucklakeColumn>> childrenByParent)

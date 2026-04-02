@@ -45,6 +45,8 @@ public class DucklakeModule
         binder.bind(DucklakeConnector.class).in(Scopes.SINGLETON);
         binder.bind(DucklakeTransactionManager.class).in(Scopes.SINGLETON);
         binder.bind(DucklakeMetadataFactory.class).in(Scopes.SINGLETON);
+        binder.bind(DucklakeSnapshotResolver.class).in(Scopes.SINGLETON);
+        binder.bind(DucklakeSessionProperties.class).in(Scopes.SINGLETON);
 
         // Catalog
         binder.bind(DucklakeCatalog.class).toProvider(DucklakeCatalogProvider.class).in(Scopes.SINGLETON);

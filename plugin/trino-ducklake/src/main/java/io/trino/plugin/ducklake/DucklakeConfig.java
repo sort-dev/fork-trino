@@ -15,7 +15,13 @@ package io.trino.plugin.ducklake;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotNull;
+
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
  * Configuration for Ducklake connector.
@@ -27,6 +33,8 @@ public class DucklakeConfig
     private String catalogDatabasePassword;
     private String dataPath;
     private int maxCatalogConnections = 10;
+    private OptionalLong defaultSnapshotId = OptionalLong.empty();
+    private Optional<Instant> defaultSnapshotTimestamp = Optional.empty();
 
     @NotNull
     public String getCatalogDatabaseUrl()
@@ -92,5 +100,47 @@ public class DucklakeConfig
     {
         this.maxCatalogConnections = maxCatalogConnections;
         return this;
+    }
+
+    public OptionalLong getDefaultSnapshotId()
+    {
+        return defaultSnapshotId;
+    }
+
+    @Config("ducklake.default-snapshot-id")
+    @ConfigDescription("Optional default DuckLake snapshot ID for reads when query/session does not specify a snapshot")
+    public DucklakeConfig setDefaultSnapshotId(Long defaultSnapshotId)
+    {
+        this.defaultSnapshotId = defaultSnapshotId == null ? OptionalLong.empty() : OptionalLong.of(defaultSnapshotId);
+        return this;
+    }
+
+    public Optional<Instant> getDefaultSnapshotTimestamp()
+    {
+        return defaultSnapshotTimestamp;
+    }
+
+    @Config("ducklake.default-snapshot-timestamp")
+    @ConfigDescription("Optional default DuckLake snapshot timestamp (ISO-8601 instant) for reads when query/session does not specify a snapshot")
+    public DucklakeConfig setDefaultSnapshotTimestamp(String defaultSnapshotTimestamp)
+    {
+        if (defaultSnapshotTimestamp == null) {
+            this.defaultSnapshotTimestamp = Optional.empty();
+            return this;
+        }
+
+        try {
+            this.defaultSnapshotTimestamp = Optional.of(Instant.parse(defaultSnapshotTimestamp));
+        }
+        catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("Invalid ducklake.default-snapshot-timestamp value: " + defaultSnapshotTimestamp, e);
+        }
+        return this;
+    }
+
+    @AssertTrue(message = "Only one of ducklake.default-snapshot-id or ducklake.default-snapshot-timestamp may be set")
+    public boolean isSnapshotDefaultsValid()
+    {
+        return defaultSnapshotId.isEmpty() || defaultSnapshotTimestamp.isEmpty();
     }
 }

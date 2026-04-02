@@ -17,6 +17,7 @@ import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeColumnStats;
 import io.trino.plugin.ducklake.catalog.DucklakeSchema;
+import io.trino.plugin.ducklake.catalog.DucklakeSnapshot;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
 import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
 import io.trino.spi.connector.ColumnHandle;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +67,21 @@ public class TestDucklakeCatalog
     }
 
     @Test
+    public void testGetSnapshotAtOrBefore()
+    {
+        long currentSnapshotId = catalog.getCurrentSnapshotId();
+        DucklakeSnapshot currentSnapshot = catalog.getSnapshot(currentSnapshotId).orElseThrow();
+
+        assertThat(catalog.getSnapshotAtOrBefore(currentSnapshot.snapshotTime()))
+                .isPresent()
+                .get()
+                .extracting(DucklakeSnapshot::snapshotId)
+                .isEqualTo(currentSnapshotId);
+
+        assertThat(catalog.getSnapshotAtOrBefore(Instant.EPOCH)).isEmpty();
+    }
+
+    @Test
     public void testListSchemas()
     {
         long snapshotId = catalog.getCurrentSnapshotId();
@@ -85,7 +102,7 @@ public class TestDucklakeCatalog
 
         assertThat(tables)
                 .isNotEmpty()
-                .hasSize(16)
+                .hasSize(17)
                 .anySatisfy(table ->
                         assertThat(table.tableName()).isEqualTo("simple_table"))
                 .anySatisfy(table ->

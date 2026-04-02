@@ -19,8 +19,8 @@ Define and implement a Trino-native read surface for DuckLake that supports:
 
 ## Current State (as implemented)
 
-- Current-snapshot reads only.
-- `DucklakeMetadata#getTableHandle(...)` accepts table version arguments but currently always resolves to `catalog.getCurrentSnapshotId()`.
+- Current-snapshot reads plus optional snapshot pinning through session/catalog defaults.
+- `DucklakeMetadata#getTableHandle(...)` still does not convert Trino table-version arguments yet (`FOR VERSION/TIMESTAMP AS OF` remains pending in R2).
 - Read path is strong on pruning and compatibility for present snapshot:
   - file stats pruning
   - partition pruning
@@ -29,7 +29,7 @@ Define and implement a Trino-native read surface for DuckLake that supports:
   - delete-file merge-on-read
   - inlined data read path for no-parquet case
 - Row-group pruning remains base-column/statistics driven; connector does not map transformed predicates like `year(ts)` onto base Parquet stats directly.
-- No connector session properties or DuckLake-specific procedures/functions are currently exposed in Trino.
+- DuckLake session properties now expose optional snapshot pinning (`read_snapshot_id`, `read_snapshot_timestamp`).
 
 ## Reality Check: Known Edge Cases
 
@@ -37,8 +37,7 @@ Define and implement a Trino-native read surface for DuckLake that supports:
   - `ducklake_inlined_data_tables` may contain a row while the physical `ducklake_inlined_data_<tableId>_<schemaVersion>` table does not exist.
   - Current behavior: catch `SQLException`, return empty, continue safely.
 - Inlined + Parquet mixed state:
-  - Current split generation only uses inlined splits when there are zero active Parquet files.
-  - Mixed state is not union-read today.
+  - Implemented: split generation emits both Parquet and inlined splits when both are active in the same snapshot.
 - Temporal partition encoding ambiguity:
   - Docs and observed behavior differ.
   - Current read path assumes DuckDB calendar semantics for temporal transforms (`year=2023`, `month=6`, `day=15`, `hour=0..23`).
@@ -85,7 +84,7 @@ Recommended columns:
 Optional session properties for “fixed read point” without editing every query:
 
 - `ducklake.read_snapshot_id` (BIGINT)
-- `ducklake.read_snapshot_timestamp` (TIMESTAMP WITH TIME ZONE)
+- `ducklake.read_snapshot_timestamp` (ISO-8601 instant string; validated as timestamp)
 
 Rules:
 
@@ -106,14 +105,14 @@ Same precedence rule: query `AS OF` > session pin > catalog pin > current snapsh
 
 ## R0: Snapshot Resolution Layer
 
-- [ ] Add a dedicated snapshot resolver component:
+- [x] Add a dedicated snapshot resolver component:
   - by version ID
   - by timestamp
   - from session defaults
-- [ ] Extend catalog API:
+- [x] Extend catalog API:
   - `Optional<DucklakeSnapshot> getSnapshot(long snapshotId)` already exists
   - add `Optional<DucklakeSnapshot> getSnapshotAtOrBefore(Instant timestamp)`
-- [ ] Centralize precedence logic (query > session > catalog > current)
+- [x] Centralize precedence logic (query > session > catalog > current)
 
 ## R1: Mixed Inlined + Parquet Union Read (Correctness First)
 

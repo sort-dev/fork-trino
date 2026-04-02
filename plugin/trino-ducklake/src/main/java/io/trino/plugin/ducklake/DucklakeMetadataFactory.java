@@ -25,18 +25,21 @@ public class DucklakeMetadataFactory
 {
     private final DucklakeCatalog catalog;
     private final DucklakeTypeConverter typeConverter;
+    private final DucklakeSnapshotResolver snapshotResolver;
 
     @Inject
     public DucklakeMetadataFactory(
             DucklakeCatalog catalog,
-            DucklakeTypeConverter typeConverter)
+            DucklakeTypeConverter typeConverter,
+            DucklakeSnapshotResolver snapshotResolver)
     {
         this.catalog = requireNonNull(catalog, "catalog is null");
         this.typeConverter = requireNonNull(typeConverter, "typeConverter is null");
+        this.snapshotResolver = requireNonNull(snapshotResolver, "snapshotResolver is null");
     }
 
     public DucklakeMetadata create()
     {
-        return new DucklakeMetadata(catalog, typeConverter);
+        return new DucklakeMetadata(catalog, typeConverter, snapshotResolver);
     }
 }
