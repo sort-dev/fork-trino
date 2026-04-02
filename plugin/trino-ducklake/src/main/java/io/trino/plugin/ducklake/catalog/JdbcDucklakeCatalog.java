@@ -139,6 +139,53 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
+    public List<DucklakeSnapshot> listSnapshots()
+    {
+        String sql = "SELECT snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id " +
+                     "FROM ducklake_snapshot " +
+                     "ORDER BY snapshot_id DESC";
+
+        List<DucklakeSnapshot> snapshots = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql);
+                ResultSet rs = stmt.executeQuery()) {
+            while (rs.next()) {
+                snapshots.add(readSnapshot(rs));
+            }
+            return snapshots;
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Failed to list snapshots", e);
+        }
+    }
+
+    @Override
+    public List<DucklakeSnapshotChange> listSnapshotChanges()
+    {
+        String sql = "SELECT snapshot_id, changes_made, author, commit_message, commit_extra_info " +
+                     "FROM ducklake_snapshot_changes " +
+                     "ORDER BY snapshot_id DESC";
+
+        List<DucklakeSnapshotChange> changes = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql);
+                ResultSet rs = stmt.executeQuery()) {
+            while (rs.next()) {
+                changes.add(new DucklakeSnapshotChange(
+                        rs.getLong("snapshot_id"),
+                        getStringOptional(rs, "changes_made"),
+                        getStringOptional(rs, "author"),
+                        getStringOptional(rs, "commit_message"),
+                        getStringOptional(rs, "commit_extra_info")));
+            }
+            return changes;
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Failed to list snapshot changes", e);
+        }
+    }
+
+    @Override
     public List<DucklakeSchema> listSchemas(long snapshotId)
     {
         String sql = "SELECT schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative " +
@@ -378,7 +425,8 @@ public class JdbcDucklakeCatalog
     {
         String sql = "SELECT data.data_file_id, data.table_id, data.begin_snapshot, data.end_snapshot, data.file_order, " +
                      "       data.path, data.path_is_relative, data.file_format, data.record_count, data.file_size_bytes, " +
-                     "       data.footer_size, data.row_id_start, del.path AS delete_file_path, del.path_is_relative AS delete_path_is_relative " +
+                     "       data.footer_size, data.row_id_start, data.partition_id, " +
+                     "       del.path AS delete_file_path, del.path_is_relative AS delete_path_is_relative " +
                      "FROM ducklake_data_file AS data " +
                      "LEFT JOIN ducklake_delete_file AS del ON data.data_file_id = del.data_file_id " +
                      "  AND ? >= del.begin_snapshot AND (? < del.end_snapshot OR del.end_snapshot IS NULL) " +
@@ -410,6 +458,7 @@ public class JdbcDucklakeCatalog
                             rs.getLong("file_size_bytes"),
                             rs.getLong("footer_size"),
                             rs.getLong("row_id_start"),
+                            getLongOptional(rs, "partition_id"),
                             getStringOptional(rs, "delete_file_path"),
                             getBooleanOptional(rs, "delete_path_is_relative")));
                 }

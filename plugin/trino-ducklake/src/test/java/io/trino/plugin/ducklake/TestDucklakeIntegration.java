@@ -142,6 +142,55 @@ public class TestDucklakeIntegration
         assertThat(types.get(3)).contains("array");  // nested_list is array of arrays
     }
 
+    @Test
+    public void testFilesMetadataTable()
+    {
+        MaterializedResult describe = computeActual("DESCRIBE \"simple_table$files\"");
+        assertThat(describe.getMaterializedRows().stream()
+                .map(row -> row.getField(0).toString()))
+                .containsExactly(
+                        "data_file_id",
+                        "path",
+                        "file_format",
+                        "record_count",
+                        "file_size_bytes",
+                        "row_id_start",
+                        "partition_id",
+                        "delete_file_path");
+
+        MaterializedResult result = computeActual("SELECT data_file_id, file_format, record_count FROM \"simple_table$files\"");
+        assertThat(result.getRowCount()).isGreaterThan(0);
+    }
+
+    @Test
+    public void testSnapshotsAndCurrentSnapshotMetadataTables()
+    {
+        MaterializedResult describe = computeActual("DESCRIBE \"simple_table$snapshots\"");
+        assertThat(describe.getMaterializedRows().stream()
+                .map(row -> row.getField(0).toString()))
+                .containsExactly("snapshot_id", "snapshot_time", "schema_version", "next_catalog_id", "next_file_id");
+
+        MaterializedResult snapshots = computeActual("SELECT snapshot_id, snapshot_time FROM \"simple_table$snapshots\"");
+        assertThat(snapshots.getRowCount()).isGreaterThan(0);
+
+        assertQuery("SELECT count(*) FROM \"simple_table$current_snapshot\"", "VALUES 1");
+        long currentSnapshotId = ((Number) computeScalar("SELECT snapshot_id FROM \"simple_table$current_snapshot\"")).longValue();
+        long maxSnapshotId = ((Number) computeScalar("SELECT max(snapshot_id) FROM \"simple_table$snapshots\"")).longValue();
+        assertThat(currentSnapshotId).isEqualTo(maxSnapshotId);
+    }
+
+    @Test
+    public void testSnapshotChangesMetadataTable()
+    {
+        MaterializedResult describe = computeActual("DESCRIBE \"simple_table$snapshot_changes\"");
+        assertThat(describe.getMaterializedRows().stream()
+                .map(row -> row.getField(0).toString()))
+                .containsExactly("snapshot_id", "changes_made", "author", "commit_message", "commit_extra_info");
+
+        MaterializedResult result = computeActual("SELECT snapshot_id FROM \"simple_table$snapshot_changes\"");
+        assertThat(result.getRowCount()).isGreaterThan(0);
+    }
+
     // ==================== information_schema ====================
 
     @Test

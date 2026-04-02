@@ -42,6 +42,16 @@ public interface DucklakeCatalog
     Optional<DucklakeSnapshot> getSnapshotAtOrBefore(Instant timestamp);
 
     /**
+     * List all snapshots in the catalog, newest first.
+     */
+    List<DucklakeSnapshot> listSnapshots();
+
+    /**
+     * List all snapshot change records, newest first.
+     */
+    List<DucklakeSnapshotChange> listSnapshotChanges();
+
+    /**
      * List all schemas visible at the given snapshot
      */
     List<DucklakeSchema> listSchemas(long snapshotId);

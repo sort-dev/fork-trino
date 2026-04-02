@@ -91,6 +91,14 @@ public class DucklakeSplitManager
             DynamicFilter dynamicFilter,
             Constraint constraint)
     {
+        if (table instanceof DucklakeMetadataTableHandle metadataTableHandle) {
+            DucklakeMetadataSplit metadataSplit = new DucklakeMetadataSplit(
+                    metadataTableHandle.baseTableId(),
+                    metadataTableHandle.snapshotId(),
+                    metadataTableHandle.metadataTableType());
+            return new FixedSplitSource(List.of(metadataSplit));
+        }
+
         DucklakeTableHandle tableHandle = (DucklakeTableHandle) table;
 
         log.debug("Getting splits for table %s at snapshot %d", tableHandle.tableName(), tableHandle.snapshotId());

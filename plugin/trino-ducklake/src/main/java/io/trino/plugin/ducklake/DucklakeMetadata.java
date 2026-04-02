@@ -69,9 +69,11 @@ import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
 import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MICROSECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Math.floorDiv;
 import static java.lang.Math.floorMod;
 import static java.util.Objects.requireNonNull;
@@ -83,6 +85,8 @@ import static java.util.Objects.requireNonNull;
 public class DucklakeMetadata
         implements ConnectorMetadata
 {
+    private static final String METADATA_TABLE_SEPARATOR = "$";
+
     private final DucklakeCatalog catalog;
     private final DucklakeTypeConverter typeConverter;
     private final DucklakeSnapshotResolver snapshotResolver;
@@ -134,11 +138,27 @@ public class DucklakeMetadata
             }
         }
 
+        Optional<MetadataTableName> metadataTable = parseMetadataTableName(tableName);
+        SchemaTableName baseTableName = metadataTable
+                .map(parsed -> new SchemaTableName(tableName.getSchemaName(), parsed.baseTableName()))
+                .orElse(tableName);
+
         long snapshotId = snapshotResolver.resolveSnapshotId(session, querySnapshotId, querySnapshotTimestamp);
 
-        Optional<DucklakeTable> table = catalog.getTable(tableName, snapshotId);
+        Optional<DucklakeTable> table = catalog.getTable(baseTableName, snapshotId);
         if (table.isEmpty()) {
             return null;
+        }
+
+        if (metadataTable.isPresent()) {
+            MetadataTableName parsed = metadataTable.get();
+            return new DucklakeMetadataTableHandle(
+                    tableName.getSchemaName(),
+                    tableName.getTableName(),
+                    parsed.baseTableName(),
+                    table.get().tableId(),
+                    snapshotId,
+                    parsed.metadataTableType());
         }
 
         return new DucklakeTableHandle(
@@ -190,6 +210,12 @@ public class DucklakeMetadata
     @Override
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
+        if (tableHandle instanceof DucklakeMetadataTableHandle metadataTableHandle) {
+            return new ConnectorTableMetadata(
+                    metadataTableHandle.getSchemaTableName(),
+                    getMetadataColumns(metadataTableHandle.metadataTableType()));
+        }
+
         DucklakeTableHandle ducklakeTableHandle = (DucklakeTableHandle) tableHandle;
 
         List<DucklakeColumn> columns = catalog.getTableColumns(
@@ -238,6 +264,10 @@ public class DucklakeMetadata
     @Override
     public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
+        if (tableHandle instanceof DucklakeMetadataTableHandle metadataTableHandle) {
+            return toColumnHandles(getMetadataColumns(metadataTableHandle.metadataTableType()));
+        }
+
         DucklakeTableHandle ducklakeTableHandle = (DucklakeTableHandle) tableHandle;
 
         List<DucklakeColumn> columns = catalog.getTableColumns(
@@ -275,6 +305,10 @@ public class DucklakeMetadata
     @Override
     public TableStatistics getTableStatistics(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
+        if (tableHandle instanceof DucklakeMetadataTableHandle) {
+            return TableStatistics.empty();
+        }
+
         DucklakeTableHandle table = (DucklakeTableHandle) tableHandle;
 
         Optional<DucklakeTableStats> tableStats = catalog.getTableStats(table.tableId());
@@ -395,6 +429,10 @@ public class DucklakeMetadata
             ConnectorTableHandle handle,
             Constraint constraint)
     {
+        if (handle instanceof DucklakeMetadataTableHandle) {
+            return Optional.empty();
+        }
+
         DucklakeTableHandle table = (DucklakeTableHandle) handle;
 
         TupleDomain<ColumnHandle> summary = constraint.getSummary();
@@ -565,6 +603,15 @@ public class DucklakeMetadata
                 .orElseGet(() -> listTables(session, prefix.getSchema()));
 
         for (SchemaTableName tableName : tables) {
+            Optional<MetadataTableName> metadataTable = parseMetadataTableName(tableName);
+            if (metadataTable.isPresent()) {
+                SchemaTableName baseTable = new SchemaTableName(tableName.getSchemaName(), metadataTable.get().baseTableName());
+                if (catalog.getTable(baseTable, snapshotId).isPresent()) {
+                    columns.put(tableName, getMetadataColumns(metadataTable.get().metadataTableType()));
+                }
+                continue;
+            }
+
             Optional<DucklakeTable> table = catalog.getTable(tableName, snapshotId);
             if (table.isPresent()) {
                 List<DucklakeColumn> tableColumns = catalog.getTableColumns(table.get().tableId(), snapshotId);
@@ -582,4 +629,78 @@ public class DucklakeMetadata
 
         return columns.buildOrThrow();
     }
+
+    private static Optional<MetadataTableName> parseMetadataTableName(SchemaTableName tableName)
+    {
+        String rawTableName = tableName.getTableName();
+        int separator = rawTableName.lastIndexOf(METADATA_TABLE_SEPARATOR);
+        if (separator <= 0 || separator == rawTableName.length() - 1) {
+            return Optional.empty();
+        }
+
+        String baseName = rawTableName.substring(0, separator);
+        String suffix = rawTableName.substring(separator + 1);
+        return DucklakeMetadataTableType.fromSuffix(suffix)
+                .map(type -> new MetadataTableName(baseName, type));
+    }
+
+    private static Map<String, ColumnHandle> toColumnHandles(List<ColumnMetadata> metadataColumns)
+    {
+        ImmutableMap.Builder<String, ColumnHandle> handles = ImmutableMap.builder();
+        for (int index = 0; index < metadataColumns.size(); index++) {
+            ColumnMetadata column = metadataColumns.get(index);
+            handles.put(
+                    column.getName(),
+                    new DucklakeColumnHandle(
+                            -(index + 1L),
+                            column.getName(),
+                            column.getType(),
+                            column.isNullable()));
+        }
+        return handles.buildOrThrow();
+    }
+
+    private static List<ColumnMetadata> getMetadataColumns(DucklakeMetadataTableType metadataTableType)
+    {
+        return switch (metadataTableType) {
+            case FILES -> ImmutableList.of(
+                    column("data_file_id", BIGINT, false),
+                    column("path", VARCHAR, false),
+                    column("file_format", VARCHAR, false),
+                    column("record_count", BIGINT, false),
+                    column("file_size_bytes", BIGINT, false),
+                    column("row_id_start", BIGINT, false),
+                    column("partition_id", BIGINT, true),
+                    column("delete_file_path", VARCHAR, true));
+            case SNAPSHOTS -> snapshotColumns();
+            case CURRENT_SNAPSHOT -> snapshotColumns();
+            case SNAPSHOT_CHANGES -> ImmutableList.of(
+                    column("snapshot_id", BIGINT, false),
+                    column("changes_made", VARCHAR, true),
+                    column("author", VARCHAR, true),
+                    column("commit_message", VARCHAR, true),
+                    column("commit_extra_info", VARCHAR, true));
+        };
+    }
+
+    private static List<ColumnMetadata> snapshotColumns()
+    {
+        return ImmutableList.of(
+                column("snapshot_id", BIGINT, false),
+                column("snapshot_time", TIMESTAMP_TZ_MILLIS, false),
+                column("schema_version", BIGINT, false),
+                column("next_catalog_id", BIGINT, false),
+                column("next_file_id", BIGINT, false));
+    }
+
+    private static ColumnMetadata column(String name, Type type, boolean nullable)
+    {
+        return ColumnMetadata.builder()
+                .setName(name)
+                .setType(type)
+                .setNullable(nullable)
+                .build();
+    }
+
+    private record MetadataTableName(String baseTableName, DucklakeMetadataTableType metadataTableType) {}
 }

@@ -129,12 +129,12 @@ Same precedence rule: query `AS OF` > session pin > catalog pin > current snapsh
 
 ## R3: Metadata Tables (`$` naming, Iceberg-style first)
 
-- [ ] Add `$files` (first-class, Iceberg-style high-value metadata)
-- [ ] Add `$snapshots`
-- [ ] Add `$current_snapshot`
-- [ ] Add `$snapshot_changes`
-- [ ] Keep schemas stable and documented.
-- [ ] Follow Iceberg-style naming/shape where possible, then add DuckLake-specific metadata tables only when needed.
+- [x] Add `$files` (first-class, Iceberg-style high-value metadata)
+- [x] Add `$snapshots`
+- [x] Add `$current_snapshot`
+- [x] Add `$snapshot_changes`
+- [x] Keep schemas stable and documented.
+- [x] Follow Iceberg-style naming/shape where possible, then add DuckLake-specific metadata tables only when needed.
 
 ## R4: Temporal Encoding Compatibility (Calendar + Epoch)
 

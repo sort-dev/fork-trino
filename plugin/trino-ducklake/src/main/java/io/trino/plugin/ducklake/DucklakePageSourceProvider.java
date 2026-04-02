@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.airlift.log.Logger;
+import io.airlift.slice.Slices;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
@@ -36,6 +37,9 @@ import io.trino.parquet.reader.RowGroupInfo;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeColumn;
+import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
+import io.trino.plugin.ducklake.catalog.DucklakeSnapshot;
+import io.trino.plugin.ducklake.catalog.DucklakeSnapshotChange;
 import io.trino.plugin.hive.TransformConnectorPageSource;
 import io.trino.plugin.hive.parquet.ParquetPageSource;
 import io.trino.spi.TrinoException;
@@ -64,7 +68,10 @@ import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -84,6 +91,8 @@ import static io.trino.plugin.hive.parquet.ParquetPageSourceFactory.createDataSo
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static java.util.Objects.requireNonNull;
 import static org.joda.time.DateTimeZone.UTC;
 
@@ -125,6 +134,10 @@ public class DucklakePageSourceProvider
     {
         requireNonNull(split, "split is null");
         requireNonNull(columns, "columns is null");
+
+        if (split instanceof DucklakeMetadataSplit metadataSplit) {
+            return createMetadataPageSource(metadataSplit, columns);
+        }
 
         if (split instanceof DucklakeInlinedSplit inlinedSplit) {
             return createInlinedPageSource(inlinedSplit, columns);
@@ -248,6 +261,105 @@ public class DucklakePageSourceProvider
 
         InMemoryRecordSet recordSet = new InMemoryRecordSet(types, convertedRows);
         return new RecordPageSource(recordSet);
+    }
+
+    private ConnectorPageSource createMetadataPageSource(DucklakeMetadataSplit metadataSplit, List<ColumnHandle> columns)
+    {
+        List<DucklakeColumnHandle> projectedColumns = columns.stream()
+                .map(DucklakeColumnHandle.class::cast)
+                .collect(toImmutableList());
+        List<Type> projectedTypes = projectedColumns.stream()
+                .map(DucklakeColumnHandle::columnType)
+                .collect(toImmutableList());
+
+        List<Map<String, Object>> rows = switch (metadataSplit.metadataTableType()) {
+            case FILES -> buildFilesRows(metadataSplit);
+            case SNAPSHOTS -> buildSnapshotRows(catalog.listSnapshots());
+            case CURRENT_SNAPSHOT -> catalog.getSnapshot(metadataSplit.snapshotId())
+                    .map(snapshot -> buildSnapshotRows(List.of(snapshot)))
+                    .orElse(List.of());
+            case SNAPSHOT_CHANGES -> buildSnapshotChangeRows(catalog.listSnapshotChanges());
+        };
+
+        List<List<Object>> projectedRows = rows.stream()
+                .map(row -> projectMetadataRow(row, projectedColumns, projectedTypes))
+                .collect(toImmutableList());
+
+        return new RecordPageSource(new InMemoryRecordSet(projectedTypes, projectedRows));
+    }
+
+    private List<Map<String, Object>> buildFilesRows(DucklakeMetadataSplit metadataSplit)
+    {
+        List<DucklakeDataFile> dataFiles = catalog.getDataFiles(metadataSplit.baseTableId(), metadataSplit.snapshotId());
+        List<Map<String, Object>> rows = new ArrayList<>(dataFiles.size());
+        for (DucklakeDataFile file : dataFiles) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("data_file_id", file.dataFileId());
+            row.put("path", file.path());
+            row.put("file_format", file.fileFormat());
+            row.put("record_count", file.recordCount());
+            row.put("file_size_bytes", file.fileSizeBytes());
+            row.put("row_id_start", file.rowIdStart());
+            row.put("partition_id", file.partitionId().orElse(null));
+            row.put("delete_file_path", file.deleteFilePath().orElse(null));
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    private static List<Map<String, Object>> buildSnapshotRows(List<DucklakeSnapshot> snapshots)
+    {
+        List<Map<String, Object>> rows = new ArrayList<>(snapshots.size());
+        for (DucklakeSnapshot snapshot : snapshots) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("snapshot_id", snapshot.snapshotId());
+            row.put("snapshot_time", snapshot.snapshotTime());
+            row.put("schema_version", snapshot.schemaVersion());
+            row.put("next_catalog_id", snapshot.nextCatalogId());
+            row.put("next_file_id", snapshot.nextFileId());
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    private static List<Map<String, Object>> buildSnapshotChangeRows(List<DucklakeSnapshotChange> changes)
+    {
+        List<Map<String, Object>> rows = new ArrayList<>(changes.size());
+        for (DucklakeSnapshotChange change : changes) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("snapshot_id", change.snapshotId());
+            row.put("changes_made", change.changesMade().orElse(null));
+            row.put("author", change.author().orElse(null));
+            row.put("commit_message", change.commitMessage().orElse(null));
+            row.put("commit_extra_info", change.commitExtraInfo().orElse(null));
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    private static List<Object> projectMetadataRow(Map<String, Object> row, List<DucklakeColumnHandle> columns, List<Type> types)
+    {
+        List<Object> projected = new ArrayList<>(columns.size());
+        for (int index = 0; index < columns.size(); index++) {
+            Object value = row.get(columns.get(index).columnName());
+            projected.add(toNativeMetadataValue(value, types.get(index)));
+        }
+        return projected;
+    }
+
+    private static Object toNativeMetadataValue(Object value, Type type)
+    {
+        if (value == null) {
+            return null;
+        }
+        if (type.equals(TIMESTAMP_TZ_MILLIS)) {
+            Instant instant = (Instant) value;
+            return io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone(instant.toEpochMilli(), UTC_KEY);
+        }
+        if (type.equals(BIGINT) || type.equals(INTEGER)) {
+            return value;
+        }
+        return Slices.utf8Slice(value.toString());
     }
 
     private ConnectorPageSource createParquetPageSource(
