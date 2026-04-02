@@ -394,8 +394,14 @@
             <dependency>
                 <groupId>com.clickhouse</groupId>
                 <artifactId>clickhouse-jdbc</artifactId>
-                <version>0.7.1-patch1</version>
+                <version>0.9.8</version>
                 <classifier>all</classifier>
+                <exclusions>
+                    <exclusion>
+                        <groupId>com.google.guava</groupId>
+                        <artifactId>listenablefuture</artifactId>
+                    </exclusion>
+                </exclusions>
             </dependency>
 
             <dependency>
@@ -517,7 +523,7 @@
             <dependency>
                 <groupId>com.nimbusds</groupId>
                 <artifactId>oauth2-oidc-sdk</artifactId>
-                <version>11.34</version>
+                <version>11.35</version>
             </dependency>
 
             <dependency>
@@ -620,7 +626,7 @@
             <dependency>
                 <groupId>io.airlift</groupId>
                 <artifactId>units</artifactId>
-                <version>1.12</version>
+                <version>1.13</version>
             </dependency>
 
             <dependency>
@@ -2243,7 +2249,7 @@
             <dependency>
                 <groupId>org.mariadb.jdbc</groupId>
                 <artifactId>mariadb-java-client</artifactId>
-                <version>3.3.4</version>
+                <version>3.5.7</version>
                 <exclusions>
                     <exclusion>
                         <groupId>com.github.waffle</groupId>
