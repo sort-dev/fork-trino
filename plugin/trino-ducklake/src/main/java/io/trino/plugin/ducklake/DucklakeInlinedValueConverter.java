@@ -17,6 +17,8 @@ import io.airlift.slice.Slices;
 import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Int128;
+import io.trino.spi.type.LongTimestamp;
+import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
@@ -27,12 +29,18 @@ import io.trino.spi.type.VarcharType;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeParseException;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.TinyintType.TINYINT;
 
 /**
@@ -68,8 +76,11 @@ public final class DucklakeInlinedValueConverter
         if (trinoType instanceof DateType) {
             return toEpochDays(jdbcValue);
         }
-        if (trinoType instanceof TimestampType || trinoType instanceof TimestampWithTimeZoneType) {
-            return toMicros(jdbcValue);
+        if (trinoType instanceof TimestampType timestampType) {
+            return toTimestamp(jdbcValue, timestampType);
+        }
+        if (trinoType instanceof TimestampWithTimeZoneType timestampWithTimeZoneType) {
+            return toTimestampWithTimeZone(jdbcValue, timestampWithTimeZoneType);
         }
         if (trinoType instanceof VarcharType) {
             return Slices.utf8Slice(toStringValue(jdbcValue));
@@ -132,15 +143,111 @@ public final class DucklakeInlinedValueConverter
         return LocalDate.parse(toStringValue(value)).toEpochDay();
     }
 
-    private static long toMicros(Object value)
+    private static Object toTimestamp(Object value, TimestampType timestampType)
     {
+        long epochMicros;
+        int picosOfMicro = 0;
+
         if (value instanceof Number n) {
-            return n.longValue();
+            epochMicros = n.longValue();
         }
-        // Parse ISO timestamp string to micros since epoch
-        String str = toStringValue(value);
-        java.time.LocalDateTime ldt = java.time.LocalDateTime.parse(str.replace(" ", "T"));
-        return ldt.toEpochSecond(java.time.ZoneOffset.UTC) * 1_000_000 + ldt.getNano() / 1_000;
+        else {
+            LocalDateTime timestamp = parseLocalDateTimeValue(value);
+            long epochSecond = timestamp.toEpochSecond(ZoneOffset.UTC);
+            int nanosOfSecond = timestamp.getNano();
+            epochMicros = epochSecond * 1_000_000 + nanosOfSecond / 1_000;
+            picosOfMicro = (nanosOfSecond % 1_000) * 1_000;
+        }
+
+        if (timestampType.isShort()) {
+            return epochMicros;
+        }
+        return new LongTimestamp(epochMicros, picosOfMicro);
+    }
+
+    private static Object toTimestampWithTimeZone(Object value, TimestampWithTimeZoneType timestampWithTimeZoneType)
+    {
+        long epochMicros;
+        int picosOfMicro = 0;
+
+        if (value instanceof Number n) {
+            epochMicros = n.longValue();
+        }
+        else {
+            OffsetDateTime timestampWithZone = parseOffsetDateTimeValue(value);
+            long epochSecond = timestampWithZone.toEpochSecond();
+            int nanosOfSecond = timestampWithZone.getNano();
+            epochMicros = epochSecond * 1_000_000 + nanosOfSecond / 1_000;
+            picosOfMicro = (nanosOfSecond % 1_000) * 1_000;
+        }
+
+        long epochMillis = Math.floorDiv(epochMicros, 1_000);
+        int microsOfMilli = (int) Math.floorMod(epochMicros, 1_000);
+        int picosOfMilli = microsOfMilli * 1_000_000 + picosOfMicro;
+
+        if (timestampWithTimeZoneType.isShort()) {
+            return packDateTimeWithZone(epochMillis, UTC_KEY);
+        }
+        return LongTimestampWithTimeZone.fromEpochMillisAndFraction(epochMillis, picosOfMilli, UTC_KEY);
+    }
+
+    private static LocalDateTime parseLocalDateTimeValue(Object value)
+    {
+        if (value instanceof LocalDateTime localDateTime) {
+            return localDateTime;
+        }
+
+        String normalized = normalizeTimestampText(toStringValue(value));
+        try {
+            return LocalDateTime.parse(normalized);
+        }
+        catch (DateTimeParseException e) {
+            // Some drivers can return offset-bearing text even for timestamp without time zone.
+            try {
+                return OffsetDateTime.parse(normalized)
+                        .atZoneSameInstant(ZoneOffset.UTC)
+                        .toLocalDateTime();
+            }
+            catch (DateTimeParseException _) {
+                throw new IllegalArgumentException("Invalid timestamp value: " + value, e);
+            }
+        }
+    }
+
+    private static OffsetDateTime parseOffsetDateTimeValue(Object value)
+    {
+        if (value instanceof OffsetDateTime offsetDateTime) {
+            return offsetDateTime;
+        }
+
+        String normalized = normalizeTimestampText(toStringValue(value));
+        try {
+            return OffsetDateTime.parse(normalized);
+        }
+        catch (DateTimeParseException e) {
+            // If no explicit zone is provided, default to UTC for internal normalization.
+            try {
+                return LocalDateTime.parse(normalized).atOffset(ZoneOffset.UTC);
+            }
+            catch (DateTimeParseException _) {
+                throw new IllegalArgumentException("Invalid timestamp with time zone value: " + value, e);
+            }
+        }
+    }
+
+    private static String normalizeTimestampText(String value)
+    {
+        String normalized = value.trim().replace(' ', 'T');
+        if (normalized.matches(".*[+-][0-9]{2}$")) {
+            normalized = normalized + ":00";
+        }
+        if (normalized.matches(".*[+-][0-9]{4}$")) {
+            normalized = normalized.substring(0, normalized.length() - 5)
+                    + normalized.substring(normalized.length() - 5, normalized.length() - 2)
+                    + ":"
+                    + normalized.substring(normalized.length() - 2);
+        }
+        return normalized;
     }
 
     private static Object toDecimal(Object value, DecimalType decimalType)

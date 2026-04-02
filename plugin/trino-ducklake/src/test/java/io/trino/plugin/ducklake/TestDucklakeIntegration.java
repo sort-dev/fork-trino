@@ -13,10 +13,12 @@
  */
 package io.trino.plugin.ducklake;
 
+import io.trino.Session;
 import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
 import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.type.TimeZoneKey;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.MaterializedRow;
@@ -24,8 +26,11 @@ import io.trino.testing.QueryRunner;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 
+import static io.trino.plugin.ducklake.DucklakeSessionProperties.READ_SNAPSHOT_TIMESTAMP;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -52,6 +57,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestDucklakeIntegration
         extends AbstractTestQueryFramework
 {
+    private static final DateTimeFormatter TIMESTAMP_LITERAL_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSSSSS");
+
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
@@ -760,6 +767,57 @@ public class TestDucklakeIntegration
         assertQuery(
                 "SELECT count(*) FROM schema_evolution_table FOR TIMESTAMP AS OF from_iso8601_timestamp('" + historicalSnapshot.snapshotTime() + "')",
                 "VALUES 2");
+    }
+
+    @Test
+    public void testForTimestampAsOfTimestampLiteralWithSessionTimeZone()
+            throws Exception
+    {
+        HistoricalSnapshot historicalSnapshot = getSchemaEvolutionHistoricalSnapshot();
+        Session utcSession = sessionWithTimeZone("UTC");
+        Session tokyoSession = sessionWithTimeZone("Asia/Tokyo");
+
+        String utcTimestampLiteral = toTimestampLiteral(historicalSnapshot.snapshotTime(), "UTC");
+        String tokyoTimestampLiteral = toTimestampLiteral(historicalSnapshot.snapshotTime(), "Asia/Tokyo");
+
+        assertQuery(
+                utcSession,
+                "SELECT count(*) FROM schema_evolution_table FOR TIMESTAMP AS OF TIMESTAMP '" + utcTimestampLiteral + "'",
+                "VALUES 2");
+        assertQuery(
+                tokyoSession,
+                "SELECT count(*) FROM schema_evolution_table FOR TIMESTAMP AS OF TIMESTAMP '" + tokyoTimestampLiteral + "'",
+                "VALUES 2");
+    }
+
+    @Test
+    public void testForTimestampAsOfTimestampWithTimeZoneIsSessionIndependent()
+            throws Exception
+    {
+        HistoricalSnapshot historicalSnapshot = getSchemaEvolutionHistoricalSnapshot();
+        Session utcSession = sessionWithTimeZone("UTC");
+        Session tokyoSession = sessionWithTimeZone("Asia/Tokyo");
+
+        String asOfInstant = historicalSnapshot.snapshotTime().toString();
+        String sql = "SELECT count(*) FROM schema_evolution_table FOR TIMESTAMP AS OF from_iso8601_timestamp('" + asOfInstant + "')";
+        assertQuery(utcSession, sql, "VALUES 2");
+        assertQuery(tokyoSession, sql, "VALUES 2");
+    }
+
+    @Test
+    public void testSessionReadSnapshotTimestampIsSessionIndependent()
+            throws Exception
+    {
+        HistoricalSnapshot historicalSnapshot = getSchemaEvolutionHistoricalSnapshot();
+        Session utcSession = Session.builder(sessionWithTimeZone("UTC"))
+                .setCatalogSessionProperty("ducklake", READ_SNAPSHOT_TIMESTAMP, historicalSnapshot.snapshotTime().toString())
+                .build();
+        Session tokyoSession = Session.builder(sessionWithTimeZone("Asia/Tokyo"))
+                .setCatalogSessionProperty("ducklake", READ_SNAPSHOT_TIMESTAMP, historicalSnapshot.snapshotTime().toString())
+                .build();
+
+        assertQuery(utcSession, "SELECT count(*) FROM schema_evolution_table", "VALUES 2");
+        assertQuery(tokyoSession, "SELECT count(*) FROM schema_evolution_table", "VALUES 2");
     }
 
     @Test
@@ -1477,6 +1535,18 @@ public class TestDucklakeIntegration
         finally {
             catalog.close();
         }
+    }
+
+    private Session sessionWithTimeZone(String zoneId)
+    {
+        return Session.builder(getSession())
+                .setTimeZoneKey(TimeZoneKey.getTimeZoneKey(zoneId))
+                .build();
+    }
+
+    private static String toTimestampLiteral(Instant instant, String zoneId)
+    {
+        return TIMESTAMP_LITERAL_FORMATTER.withZone(ZoneId.of(zoneId)).format(instant);
     }
 
     private record HistoricalSnapshot(long snapshotId, Instant snapshotTime) {}

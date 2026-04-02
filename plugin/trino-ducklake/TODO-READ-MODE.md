@@ -144,9 +144,9 @@ Same precedence rule: query `AS OF` > session pin > catalog pin > current snapsh
 
 ## R5: Optional Session/Catalog Pinning
 
-- [ ] Session properties wiring
-- [ ] Optional catalog startup pin properties
-- [ ] Validate precedence and conflict errors
+- [x] Session properties wiring
+- [x] Optional catalog startup pin properties
+- [x] Validate precedence and conflict errors
 
 ## R6: Change Feed and Extended Metadata Parity (later)
 

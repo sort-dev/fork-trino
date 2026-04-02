@@ -101,6 +101,17 @@ public class TestDucklakeSnapshotResolver
     }
 
     @Test
+    public void testCatalogDefaultSnapshotTimestampUsedWhenSessionUnset()
+    {
+        DucklakeSnapshot currentSnapshot = catalog.getSnapshot(catalog.getCurrentSnapshotId()).orElseThrow();
+        Instant catalogDefaultTimestamp = currentSnapshot.snapshotTime().plusMillis(1);
+        long expectedSnapshotId = catalog.getSnapshotAtOrBefore(catalogDefaultTimestamp).orElseThrow().snapshotId();
+        DucklakeSnapshotResolver resolver = new DucklakeSnapshotResolver(catalog, OptionalLong.empty(), Optional.of(catalogDefaultTimestamp));
+
+        assertThat(resolver.resolveSnapshotId(createSession(ImmutableMap.of()))).isEqualTo(expectedSnapshotId);
+    }
+
+    @Test
     public void testFallsBackToCurrentSnapshotWhenNoOverrides()
     {
         DucklakeSnapshotResolver resolver = new DucklakeSnapshotResolver(catalog, OptionalLong.empty(), Optional.empty());

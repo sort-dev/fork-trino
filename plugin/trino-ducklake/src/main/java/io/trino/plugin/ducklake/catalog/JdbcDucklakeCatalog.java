@@ -26,7 +26,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -120,17 +119,16 @@ public class JdbcDucklakeCatalog
     {
         String sql = "SELECT snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id " +
                      "FROM ducklake_snapshot " +
-                     "WHERE snapshot_time <= ? " +
-                     "ORDER BY snapshot_time DESC, snapshot_id DESC " +
-                     "LIMIT 1";
+                     "ORDER BY snapshot_id DESC";
 
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.setTimestamp(1, Timestamp.from(timestamp));
-
             try (ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) {
-                    return Optional.of(readSnapshot(rs));
+                while (rs.next()) {
+                    DucklakeSnapshot snapshot = readSnapshot(rs);
+                    if (!snapshot.snapshotTime().isAfter(timestamp)) {
+                        return Optional.of(snapshot);
+                    }
                 }
                 return Optional.empty();
             }
@@ -804,10 +802,30 @@ public class JdbcDucklakeCatalog
     {
         return new DucklakeSnapshot(
                 rs.getLong("snapshot_id"),
-                rs.getTimestamp("snapshot_time").toInstant(),
+                parseSnapshotTime(rs.getString("snapshot_time")),
                 rs.getLong("schema_version"),
                 rs.getLong("next_catalog_id"),
                 rs.getLong("next_file_id"));
+    }
+
+    private static Instant parseSnapshotTime(String snapshotTime)
+    {
+        if (snapshotTime == null) {
+            throw new IllegalStateException("DuckLake snapshot_time is null");
+        }
+
+        String normalized = snapshotTime.trim().replace(' ', 'T');
+        if (normalized.matches(".*[+-][0-9]{2}$")) {
+            normalized = normalized + ":00";
+        }
+        if (normalized.matches(".*[+-][0-9]{4}$")) {
+            normalized = normalized.substring(0, normalized.length() - 5)
+                    + normalized.substring(normalized.length() - 5, normalized.length() - 2)
+                    + ":"
+                    + normalized.substring(normalized.length() - 2);
+        }
+
+        return java.time.OffsetDateTime.parse(normalized).toInstant();
     }
 
     private String resolveColumnType(DucklakeColumn column, Map<Long, List<DucklakeColumn>> childrenByParent)
