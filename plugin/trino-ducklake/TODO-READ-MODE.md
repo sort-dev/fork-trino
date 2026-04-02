@@ -273,6 +273,9 @@ Instead of filtering out DuckDB-dialect views, transpile them to Trino SQL at re
 - **sqlglot-rust (crates.io) / sql-glot-rust (Protegrity)**: https://github.com/protegrity/sql-glot-rust — similar Rust port, v0.9.24
 - **polyglot-sql**: https://github.com/tobilg/polyglot — Rust, very early stage
 
+opposite direction:
+- **papera**: https://lib.rs/crates/papera (trino to duck)
+
 **WASM-on-JVM runtime**:
 - **Chicory**: https://github.com/dylibso/chicory — pure Java WASM interpreter, no native dependencies, works in any JVM. Right choice for Trino plugins (classloader isolation, no JNI). Performance is fine for transpiling a single SQL string per view access (plan time, not hot path).
 - GraalVM WASM and wasmtime-java/wasmer-java are alternatives but require native code or specific JVM, which Trino plugins can't guarantee.
