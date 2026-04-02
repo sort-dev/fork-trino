@@ -31,7 +31,10 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.LongTimestampWithTimeZone;
 import io.trino.spi.type.RowType;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -41,6 +44,8 @@ import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.connector.TestingConnectorSession.SESSION;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -54,6 +59,7 @@ public class TestDucklakePartitionPruning
     private static DucklakeTable partitionedTable;
     private static DucklakeTable temporalPartitionedTable;
     private static DucklakeTable dailyPartitionedTable;
+    private static DucklakeTable timestampPartitionedTable;
 
     @BeforeAll
     public static void setUpClass()
@@ -74,6 +80,9 @@ public class TestDucklakePartitionPruning
                 .findFirst().orElseThrow();
         dailyPartitionedTable = catalog.listTables(schema.schemaId(), snapshotId).stream()
                 .filter(t -> t.tableName().equals("daily_partitioned_table"))
+                .findFirst().orElseThrow();
+        timestampPartitionedTable = catalog.listTables(schema.schemaId(), snapshotId).stream()
+                .filter(t -> t.tableName().equals("timestamp_partitioned_table"))
                 .findFirst().orElseThrow();
     }
 
@@ -683,6 +692,183 @@ public class TestDucklakePartitionPruning
         List<DucklakeSplit> prunedSplits = getSplits(splitManager, tableHandle);
 
         // Jun 15 and Jun 20 survive; Jul 1 and Jan 2024 are pruned
+        assertThat(prunedSplits).hasSize(2);
+    }
+
+    // --- TIMESTAMP_TZ partition pruning tests ---
+    // These verify that temporal partition pruning works with TIMESTAMP WITH TIME ZONE columns,
+    // specifically with exclusive Range bounds that Trino does NOT normalize to inclusive
+    // (unlike DATE which is discrete and gets normalized).
+
+    @Test
+    public void testTimestampTzPartitionSpecHasThreeTransforms()
+    {
+        List<DucklakePartitionSpec> specs = catalog.getPartitionSpecs(
+                timestampPartitionedTable.tableId(), snapshotId);
+
+        assertThat(specs).hasSize(1);
+        DucklakePartitionSpec spec = specs.getFirst();
+        assertThat(spec.fields()).hasSize(3);
+        assertThat(spec.fields().get(0).transform()).isEqualTo(DucklakePartitionTransform.YEAR);
+        assertThat(spec.fields().get(1).transform()).isEqualTo(DucklakePartitionTransform.MONTH);
+        assertThat(spec.fields().get(2).transform()).isEqualTo(DucklakePartitionTransform.DAY);
+    }
+
+    @Test
+    public void testTimestampTzFilePartitionValuesPresent()
+    {
+        Map<Long, List<DucklakeFilePartitionValue>> values = catalog.getFilePartitionValues(
+                timestampPartitionedTable.tableId(), snapshotId);
+
+        // 3 files: March 7, March 8, June 15
+        assertThat(values).hasSize(3);
+        for (List<DucklakeFilePartitionValue> fileValues : values.values()) {
+            assertThat(fileValues).hasSize(3); // year + month + day
+        }
+    }
+
+    @Test
+    public void testTimestampTzApplyFilterClassifiesAsEnforced()
+    {
+        DucklakeTypeConverter typeConverter = new DucklakeTypeConverter(TESTING_TYPE_MANAGER);
+        DucklakeMetadata metadata = new DucklakeMetadata(catalog, typeConverter);
+
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "timestamp_partitioned_table",
+                timestampPartitionedTable.tableId(), snapshotId);
+
+        long insertedAtColumnId = catalog.getTableColumns(timestampPartitionedTable.tableId(), snapshotId).stream()
+                .filter(c -> c.columnName().equals("inserted_at"))
+                .findFirst().orElseThrow().columnId();
+        DucklakeColumnHandle insertedAtColumn = new DucklakeColumnHandle(
+                insertedAtColumnId, "inserted_at", TIMESTAMP_TZ_MICROS, true);
+
+        // Range: [2026-03-07T00:00:00Z, 2026-03-08T00:00:00Z) — typical day query with exclusive high
+        LongTimestampWithTimeZone low = LongTimestampWithTimeZone.fromEpochMillisAndFraction(
+                1_772_841_600_000L, 0, UTC_KEY);
+        LongTimestampWithTimeZone high = LongTimestampWithTimeZone.fromEpochMillisAndFraction(
+                1_772_841_600_000L + 86_400_000L, 0, UTC_KEY);
+
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(
+                ImmutableMap.of((ColumnHandle) insertedAtColumn,
+                        Domain.create(ValueSet.ofRanges(
+                                Range.range(TIMESTAMP_TZ_MICROS, low, true, high, false)), false))));
+
+        Optional<ConstraintApplicationResult<ConnectorTableHandle>> result =
+                metadata.applyFilter(SESSION, tableHandle, constraint);
+
+        assertThat(result).isPresent();
+        DucklakeTableHandle newHandle = (DucklakeTableHandle) result.get().getHandle();
+
+        // TIMESTAMP_TZ with temporal transforms should be partially enforced
+        assertThat(newHandle.enforcedPredicate().isAll()).isFalse();
+        assertThat(newHandle.enforcedPredicate().getDomains().orElseThrow()).containsKey(insertedAtColumn);
+        // Partially enforced: engine still needs to verify
+        assertThat(newHandle.unenforcedPredicate().isAll()).isFalse();
+    }
+
+    @Test
+    public void testTimestampTzExclusiveHighPrunesToSingleDay()
+            throws Exception
+    {
+        // This is the exact real-world pattern: WHERE inserted_at >= TIMESTAMP '...' AND inserted_at < TIMESTAMP '...'
+        // The < produces an exclusive high bound. Without the boundary fix, day=8 would NOT be pruned.
+        DucklakeSplitManager splitManager = new DucklakeSplitManager(catalog, config);
+
+        long insertedAtColumnId = catalog.getTableColumns(timestampPartitionedTable.tableId(), snapshotId).stream()
+                .filter(c -> c.columnName().equals("inserted_at"))
+                .findFirst().orElseThrow().columnId();
+        DucklakeColumnHandle insertedAtColumn = new DucklakeColumnHandle(
+                insertedAtColumnId, "inserted_at", TIMESTAMP_TZ_MICROS, true);
+
+        // Range: [2026-03-07T00:00:00Z, 2026-03-08T00:00:00Z) — exclusive high at midnight boundary
+        LongTimestampWithTimeZone low = LongTimestampWithTimeZone.fromEpochMillisAndFraction(
+                1_772_841_600_000L, 0, UTC_KEY);
+        LongTimestampWithTimeZone high = LongTimestampWithTimeZone.fromEpochMillisAndFraction(
+                1_772_841_600_000L + 86_400_000L, 0, UTC_KEY);
+
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "timestamp_partitioned_table",
+                timestampPartitionedTable.tableId(), snapshotId,
+                TupleDomain.all(),
+                TupleDomain.withColumnDomains(ImmutableMap.of(
+                        insertedAtColumn, Domain.create(ValueSet.ofRanges(
+                                Range.range(TIMESTAMP_TZ_MICROS, low, true, high, false)), false))));
+
+        List<DucklakeSplit> allSplits = getSplits(splitManager, new DucklakeTableHandle(
+                "test_schema", "timestamp_partitioned_table",
+                timestampPartitionedTable.tableId(), snapshotId));
+
+        List<DucklakeSplit> prunedSplits = getSplits(splitManager, tableHandle);
+
+        // 3 files total (Mar 7, Mar 8, Jun 15). Only Mar 7 should survive.
+        assertThat(allSplits).hasSize(3);
+        assertThat(prunedSplits).hasSize(1);
+    }
+
+    @Test
+    public void testTimestampTzExclusiveHighNotAtBoundaryKeepsBothDays()
+            throws Exception
+    {
+        // Range: [2026-03-07T00:00:00Z, 2026-03-08T12:00:00Z) — exclusive high at NOON, not a day boundary
+        // Day 8 should NOT be pruned because there's data before noon
+        DucklakeSplitManager splitManager = new DucklakeSplitManager(catalog, config);
+
+        long insertedAtColumnId = catalog.getTableColumns(timestampPartitionedTable.tableId(), snapshotId).stream()
+                .filter(c -> c.columnName().equals("inserted_at"))
+                .findFirst().orElseThrow().columnId();
+        DucklakeColumnHandle insertedAtColumn = new DucklakeColumnHandle(
+                insertedAtColumnId, "inserted_at", TIMESTAMP_TZ_MICROS, true);
+
+        LongTimestampWithTimeZone low = LongTimestampWithTimeZone.fromEpochMillisAndFraction(
+                1_772_841_600_000L, 0, UTC_KEY);
+        LongTimestampWithTimeZone high = LongTimestampWithTimeZone.fromEpochMillisAndFraction(
+                1_772_841_600_000L + 86_400_000L + 43_200_000L, 0, UTC_KEY); // noon on March 8
+
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "timestamp_partitioned_table",
+                timestampPartitionedTable.tableId(), snapshotId,
+                TupleDomain.all(),
+                TupleDomain.withColumnDomains(ImmutableMap.of(
+                        insertedAtColumn, Domain.create(ValueSet.ofRanges(
+                                Range.range(TIMESTAMP_TZ_MICROS, low, true, high, false)), false))));
+
+        List<DucklakeSplit> prunedSplits = getSplits(splitManager, tableHandle);
+
+        // Both Mar 7 and Mar 8 should survive (not Jun 15)
+        assertThat(prunedSplits).hasSize(2);
+    }
+
+    @Test
+    public void testTimestampTzInclusiveHighAtBoundaryKeepsBothDays()
+            throws Exception
+    {
+        // Range: [2026-03-07T00:00:00Z, 2026-03-08T00:00:00Z] — INCLUSIVE high at midnight
+        // Day 8 should be kept because midnight of March 8 is explicitly included
+        DucklakeSplitManager splitManager = new DucklakeSplitManager(catalog, config);
+
+        long insertedAtColumnId = catalog.getTableColumns(timestampPartitionedTable.tableId(), snapshotId).stream()
+                .filter(c -> c.columnName().equals("inserted_at"))
+                .findFirst().orElseThrow().columnId();
+        DucklakeColumnHandle insertedAtColumn = new DucklakeColumnHandle(
+                insertedAtColumnId, "inserted_at", TIMESTAMP_TZ_MICROS, true);
+
+        LongTimestampWithTimeZone low = LongTimestampWithTimeZone.fromEpochMillisAndFraction(
+                1_772_841_600_000L, 0, UTC_KEY);
+        LongTimestampWithTimeZone high = LongTimestampWithTimeZone.fromEpochMillisAndFraction(
+                1_772_841_600_000L + 86_400_000L, 0, UTC_KEY);
+
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "timestamp_partitioned_table",
+                timestampPartitionedTable.tableId(), snapshotId,
+                TupleDomain.all(),
+                TupleDomain.withColumnDomains(ImmutableMap.of(
+                        insertedAtColumn, Domain.create(ValueSet.ofRanges(
+                                Range.range(TIMESTAMP_TZ_MICROS, low, true, high, true)), false))));
+
+        List<DucklakeSplit> prunedSplits = getSplits(splitManager, tableHandle);
+
+        // Both Mar 7 and Mar 8 should survive (inclusive high includes midnight of Mar 8)
         assertThat(prunedSplits).hasSize(2);
     }
 

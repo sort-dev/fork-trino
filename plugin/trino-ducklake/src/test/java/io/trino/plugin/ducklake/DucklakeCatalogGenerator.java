@@ -306,6 +306,39 @@ public final class DucklakeCatalogGenerator
                         (5, 'New year event', '2024-01-10', 50.0)
                     """);
 
+            // Table 18: Partitioned by day on a TIMESTAMPTZ column (matches real-world ingest patterns)
+            System.out.println("Creating timestamp_partitioned_table (TIMESTAMPTZ partitioned by day)...");
+            stmt.execute("""
+                    CREATE TABLE ducklake_db.test_schema.timestamp_partitioned_table (
+                        id INTEGER,
+                        event_name VARCHAR,
+                        inserted_at TIMESTAMPTZ,
+                        amount DOUBLE
+                    )
+                    """);
+
+            System.out.println("Setting partition by year/month/day on inserted_at...");
+            stmt.execute("ALTER TABLE ducklake_db.test_schema.timestamp_partitioned_table SET PARTITIONED BY (year(inserted_at), month(inserted_at), day(inserted_at))");
+
+            System.out.println("Inserting timestamp partitioned data...");
+            // File 1: March 7, 2026
+            stmt.execute("""
+                    INSERT INTO ducklake_db.test_schema.timestamp_partitioned_table VALUES
+                        (1, 'Morning event', '2026-03-07 08:00:00+00', 100.0),
+                        (2, 'Afternoon event', '2026-03-07 14:30:00+00', 150.0)
+                    """);
+            // File 2: March 8, 2026
+            stmt.execute("""
+                    INSERT INTO ducklake_db.test_schema.timestamp_partitioned_table VALUES
+                        (3, 'Next day event', '2026-03-08 09:00:00+00', 200.0),
+                        (4, 'Next day late', '2026-03-08 22:00:00+00', 250.0)
+                    """);
+            // File 3: June 15, 2026
+            stmt.execute("""
+                    INSERT INTO ducklake_db.test_schema.timestamp_partitioned_table VALUES
+                        (5, 'Summer event', '2026-06-15 10:00:00+00', 300.0)
+                    """);
+
             // Table 6: Nested types (struct, map, nested arrays)
             System.out.println("Creating nested_table (struct, map, nested arrays)...");
             stmt.execute("""
@@ -618,6 +651,7 @@ public final class DucklakeCatalogGenerator
             System.out.println("  - test_schema.partitioned_table (5 rows, partitioned by region)");
             System.out.println("  - test_schema.temporal_partitioned_table (6 rows, partitioned by year/month)");
             System.out.println("  - test_schema.daily_partitioned_table (5 rows, partitioned by year/month/day)");
+            System.out.println("  - test_schema.timestamp_partitioned_table (5 rows, TIMESTAMPTZ partitioned by year/month/day)");
             System.out.println("  - test_schema.nested_table (3 rows, struct/map/nested arrays)");
             System.out.println("  - test_schema.wide_types_table (3 rows, many primitive types)");
             System.out.println("  - test_schema.nullable_table (4 rows, NULLs in every column type)");

@@ -112,6 +112,19 @@ final class DucklakeTemporalPartitionMatcher
                 .map(v -> applyTemporalTransform(columnType, v, transform, encoding))
                 .orElse(Long.MAX_VALUE);
 
+        // For non-DATE types, Trino does not normalize exclusive bounds to inclusive
+        // (DATE is discrete so Trino converts e.g. `< DATE '2026-03-08'` to `<= DATE '2026-03-07'`).
+        // When an exclusive high bound falls exactly on a partition transform boundary
+        // (e.g. `< TIMESTAMP '2026-03-08 00:00:00'` with DAY transform), no data in that
+        // partition can satisfy the predicate, so we must adjust the effective bound.
+        if (!columnType.equals(io.trino.spi.type.DateType.DATE) &&
+                range.getHighValue().isPresent() && !range.isHighInclusive()) {
+            long epochMicros = extractEpochMicros(columnType, range.getHighValue().get());
+            if (isAtTransformBoundary(epochMicros, transform)) {
+                highTransformed--;
+            }
+        }
+
         // Calendar month/day/hour transforms are not monotonic over broad ranges.
         // In wrapping cases, skip pruning to avoid false negatives.
         if (encoding == CALENDAR &&
@@ -121,6 +134,29 @@ final class DucklakeTemporalPartitionMatcher
         }
 
         return transformedValue >= lowTransformed && transformedValue <= highTransformed;
+    }
+
+    private static boolean isAtTransformBoundary(long epochMicros, DucklakePartitionTransform transform)
+    {
+        return switch (transform) {
+            case HOUR -> epochMicros % 3_600_000_000L == 0;
+            case DAY -> epochMicros % 86_400_000_000L == 0;
+            case MONTH -> {
+                if (epochMicros % 86_400_000_000L != 0) {
+                    yield false;
+                }
+                LocalDate date = LocalDate.ofEpochDay(epochMicros / 86_400_000_000L);
+                yield date.getDayOfMonth() == 1;
+            }
+            case YEAR -> {
+                if (epochMicros % 86_400_000_000L != 0) {
+                    yield false;
+                }
+                LocalDate date = LocalDate.ofEpochDay(epochMicros / 86_400_000_000L);
+                yield date.getMonthValue() == 1 && date.getDayOfMonth() == 1;
+            }
+            default -> false;
+        };
     }
 
     private static long applyTemporalTransform(Type columnType, Object value, DucklakePartitionTransform transform, DucklakeTemporalPartitionEncoding encoding)
