@@ -434,6 +434,95 @@ public class TestDucklakePartitionPruning
     }
 
     @Test
+    public void testSplitManagerEpochStrictPrunesCalendarCatalogTooAggressively()
+            throws Exception
+    {
+        DucklakeConfig epochStrictConfig = DucklakeTestCatalogEnvironment.createDucklakeConfig()
+                .setTemporalPartitionEncoding("epoch")
+                .setTemporalPartitionEncodingReadLeniency(false);
+        DucklakeSplitManager splitManager = new DucklakeSplitManager(catalog, epochStrictConfig);
+
+        long eventDateColumnId = catalog.getTableColumns(dailyPartitionedTable.tableId(), snapshotId).stream()
+                .filter(c -> c.columnName().equals("event_date"))
+                .findFirst().orElseThrow().columnId();
+        DucklakeColumnHandle eventDateColumn = new DucklakeColumnHandle(
+                eventDateColumnId, "event_date", io.trino.spi.type.DateType.DATE, true);
+
+        long june15 = java.time.LocalDate.of(2023, 6, 15).toEpochDay();
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "daily_partitioned_table",
+                dailyPartitionedTable.tableId(), snapshotId,
+                TupleDomain.all(),
+                TupleDomain.withColumnDomains(ImmutableMap.of(
+                        eventDateColumn, Domain.singleValue(io.trino.spi.type.DateType.DATE, june15))));
+
+        List<DucklakeSplit> prunedSplits = getSplits(splitManager, tableHandle);
+        assertThat(prunedSplits).isEmpty();
+    }
+
+    @Test
+    public void testSplitManagerEpochLenientReadsCalendarCatalogSafely()
+            throws Exception
+    {
+        DucklakeConfig epochLenientConfig = DucklakeTestCatalogEnvironment.createDucklakeConfig()
+                .setTemporalPartitionEncoding("epoch")
+                .setTemporalPartitionEncodingReadLeniency(true);
+        DucklakeSplitManager splitManager = new DucklakeSplitManager(catalog, epochLenientConfig);
+
+        long eventDateColumnId = catalog.getTableColumns(dailyPartitionedTable.tableId(), snapshotId).stream()
+                .filter(c -> c.columnName().equals("event_date"))
+                .findFirst().orElseThrow().columnId();
+        DucklakeColumnHandle eventDateColumn = new DucklakeColumnHandle(
+                eventDateColumnId, "event_date", io.trino.spi.type.DateType.DATE, true);
+
+        long june15 = java.time.LocalDate.of(2023, 6, 15).toEpochDay();
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "daily_partitioned_table",
+                dailyPartitionedTable.tableId(), snapshotId,
+                TupleDomain.all(),
+                TupleDomain.withColumnDomains(ImmutableMap.of(
+                        eventDateColumn, Domain.singleValue(io.trino.spi.type.DateType.DATE, june15))));
+
+        List<DucklakeSplit> prunedSplits = getSplits(splitManager, tableHandle);
+        assertThat(prunedSplits).hasSize(1);
+    }
+
+    @Test
+    public void testSplitManagerCalendarStrictAndLenientMatchForCalendarCatalog()
+            throws Exception
+    {
+        DucklakeConfig calendarStrictConfig = DucklakeTestCatalogEnvironment.createDucklakeConfig()
+                .setTemporalPartitionEncoding("calendar")
+                .setTemporalPartitionEncodingReadLeniency(false);
+        DucklakeConfig calendarLenientConfig = DucklakeTestCatalogEnvironment.createDucklakeConfig()
+                .setTemporalPartitionEncoding("calendar")
+                .setTemporalPartitionEncodingReadLeniency(true);
+
+        DucklakeSplitManager strictSplitManager = new DucklakeSplitManager(catalog, calendarStrictConfig);
+        DucklakeSplitManager lenientSplitManager = new DucklakeSplitManager(catalog, calendarLenientConfig);
+
+        long eventDateColumnId = catalog.getTableColumns(dailyPartitionedTable.tableId(), snapshotId).stream()
+                .filter(c -> c.columnName().equals("event_date"))
+                .findFirst().orElseThrow().columnId();
+        DucklakeColumnHandle eventDateColumn = new DucklakeColumnHandle(
+                eventDateColumnId, "event_date", io.trino.spi.type.DateType.DATE, true);
+
+        long june15 = java.time.LocalDate.of(2023, 6, 15).toEpochDay();
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "daily_partitioned_table",
+                dailyPartitionedTable.tableId(), snapshotId,
+                TupleDomain.all(),
+                TupleDomain.withColumnDomains(ImmutableMap.of(
+                        eventDateColumn, Domain.singleValue(io.trino.spi.type.DateType.DATE, june15))));
+
+        List<DucklakeSplit> strictSplits = getSplits(strictSplitManager, tableHandle);
+        List<DucklakeSplit> lenientSplits = getSplits(lenientSplitManager, tableHandle);
+
+        assertThat(strictSplits).hasSize(1);
+        assertThat(lenientSplits).hasSize(1);
+    }
+
+    @Test
     public void testTemporalPruningByYearOnly()
             throws Exception
     {

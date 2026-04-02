@@ -75,12 +75,16 @@ public class DucklakeSplitManager
 
     private final DucklakeCatalog catalog;
     private final DucklakeConfig config;
+    private final DucklakeTemporalPartitionEncoding temporalPartitionEncoding;
+    private final boolean temporalPartitionEncodingReadLeniency;
 
     @Inject
     public DucklakeSplitManager(DucklakeCatalog catalog, DucklakeConfig config)
     {
         this.catalog = requireNonNull(catalog, "catalog is null");
         this.config = requireNonNull(config, "config is null");
+        this.temporalPartitionEncoding = config.getTemporalPartitionEncoding();
+        this.temporalPartitionEncodingReadLeniency = config.isTemporalPartitionEncodingReadLeniency();
     }
 
     @Override
@@ -419,7 +423,7 @@ public class DucklakeSplitManager
         return result;
     }
 
-    private static boolean partitionValueMatchesDomain(Type columnType, String partitionValue, Domain domain, DucklakePartitionTransform transform)
+    private boolean partitionValueMatchesDomain(Type columnType, String partitionValue, Domain domain, DucklakePartitionTransform transform)
     {
         try {
             if (transform.isIdentity()) {
@@ -427,92 +431,19 @@ public class DucklakeSplitManager
                 return domain.includesNullableValue(nativeValue);
             }
             if (transform.isTemporal()) {
-                return temporalPartitionMatchesDomain(columnType, partitionValue, domain, transform);
+                return DucklakeTemporalPartitionMatcher.partitionValueMatchesDomain(
+                        columnType,
+                        partitionValue,
+                        domain,
+                        transform,
+                        temporalPartitionEncoding,
+                        temporalPartitionEncodingReadLeniency);
             }
             return true; // unknown transform — don't prune
         }
         catch (RuntimeException _) {
             return true; // parse failure — don't prune to avoid false negatives
         }
-    }
-
-    private static boolean temporalPartitionMatchesDomain(Type columnType, String partitionValue, Domain domain, DucklakePartitionTransform transform)
-    {
-        // Partition value for temporal transforms is the transformed integer (e.g., years from epoch)
-        long transformedValue = Long.parseLong(partitionValue);
-
-        // Convert domain bounds to transformed values and check containment
-        if (domain.isNone()) {
-            return false;
-        }
-        if (domain.getValues().isAll()) {
-            return true;
-        }
-
-        // For each range in the domain, apply the transform to the bounds and check
-        // if the partition's transformed value could overlap
-        return domain.getValues().getValuesProcessor().transform(
-                ranges -> {
-                    for (Range range : ranges.getOrderedRanges()) {
-                        if (temporalRangeContainsTransformedValue(columnType, range, transformedValue, transform)) {
-                            return true;
-                        }
-                    }
-                    return false;
-                },
-                discreteValues -> {
-                    for (Object value : discreteValues.getValues()) {
-                        long transformed = applyTemporalTransform(columnType, value, transform);
-                        if (transformed == transformedValue) {
-                            return true;
-                        }
-                    }
-                    return false;
-                },
-                allOrNone -> true);
-    }
-
-    private static boolean temporalRangeContainsTransformedValue(Type columnType, Range range, long transformedValue, DucklakePartitionTransform transform)
-    {
-        long lowTransformed = range.getLowValue()
-                .map(v -> applyTemporalTransform(columnType, v, transform))
-                .orElse(Long.MIN_VALUE);
-        long highTransformed = range.getHighValue()
-                .map(v -> applyTemporalTransform(columnType, v, transform))
-                .orElse(Long.MAX_VALUE);
-
-        // For month/day/hour transforms, values can wrap (e.g., a date range from Nov to Feb
-        // produces month values 11..2). In wrapping cases, skip pruning to avoid false negatives.
-        if (transform.isTemporal() && !transform.equals(DucklakePartitionTransform.YEAR) && lowTransformed > highTransformed) {
-            return true; // wrapping range — don't prune
-        }
-        return transformedValue >= lowTransformed && transformedValue <= highTransformed;
-    }
-
-    private static long applyTemporalTransform(Type columnType, Object value, DucklakePartitionTransform transform)
-    {
-        // DuckDB's Ducklake extension writes calendar values for temporal transforms:
-        // year -> calendar year (e.g., 2023), month -> calendar month (1-12),
-        // day -> day of month (1-31), hour -> hour of day (0-23)
-        LocalDate date;
-        int hour = 0;
-        if (columnType.equals(DATE)) {
-            date = LocalDate.ofEpochDay((long) value);
-        }
-        else {
-            // Timestamp types: value is micros since epoch
-            long microsSinceEpoch = (long) value;
-            long secondsSinceEpoch = Math.floorDiv(microsSinceEpoch, 1_000_000);
-            date = LocalDate.ofEpochDay(Math.floorDiv(secondsSinceEpoch, 86400));
-            hour = (int) (Math.floorMod(secondsSinceEpoch, 86400) / 3600);
-        }
-        return switch (transform) {
-            case YEAR -> date.getYear();
-            case MONTH -> date.getMonthValue();
-            case DAY -> date.getDayOfMonth();
-            case HOUR -> hour;
-            default -> throw new IllegalArgumentException("Unsupported transform: " + transform);
-        };
     }
 
     private static Object parsePartitionValue(Type type, String value)

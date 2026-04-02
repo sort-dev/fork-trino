@@ -35,6 +35,8 @@ public class DucklakeConfig
     private int maxCatalogConnections = 10;
     private OptionalLong defaultSnapshotId = OptionalLong.empty();
     private Optional<Instant> defaultSnapshotTimestamp = Optional.empty();
+    private DucklakeTemporalPartitionEncoding temporalPartitionEncoding = DucklakeTemporalPartitionEncoding.CALENDAR;
+    private boolean temporalPartitionEncodingReadLeniency = true;
 
     @NotNull
     public String getCatalogDatabaseUrl()
@@ -135,6 +137,43 @@ public class DucklakeConfig
         catch (DateTimeParseException e) {
             throw new IllegalArgumentException("Invalid ducklake.default-snapshot-timestamp value: " + defaultSnapshotTimestamp, e);
         }
+        return this;
+    }
+
+    @NotNull
+    public DucklakeTemporalPartitionEncoding getTemporalPartitionEncoding()
+    {
+        return temporalPartitionEncoding;
+    }
+
+    @Config("ducklake.temporal-partition-encoding")
+    @ConfigDescription("Temporal partition encoding used for writes and strict reads: calendar or epoch")
+    public DucklakeConfig setTemporalPartitionEncoding(String temporalPartitionEncoding)
+    {
+        if (temporalPartitionEncoding == null) {
+            this.temporalPartitionEncoding = DucklakeTemporalPartitionEncoding.CALENDAR;
+            return this;
+        }
+
+        try {
+            this.temporalPartitionEncoding = DucklakeTemporalPartitionEncoding.fromString(temporalPartitionEncoding);
+        }
+        catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Invalid ducklake.temporal-partition-encoding value: " + temporalPartitionEncoding + " (expected: calendar or epoch)", e);
+        }
+        return this;
+    }
+
+    public boolean isTemporalPartitionEncodingReadLeniency()
+    {
+        return temporalPartitionEncodingReadLeniency;
+    }
+
+    @Config("ducklake.temporal-partition-encoding-read-leniency")
+    @ConfigDescription("If true, temporal partition pruning keeps files unless both calendar and epoch interpretations exclude them")
+    public DucklakeConfig setTemporalPartitionEncodingReadLeniency(boolean temporalPartitionEncodingReadLeniency)
+    {
+        this.temporalPartitionEncodingReadLeniency = temporalPartitionEncodingReadLeniency;
         return this;
     }
 

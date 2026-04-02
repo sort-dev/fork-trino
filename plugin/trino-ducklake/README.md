@@ -43,6 +43,23 @@ ducklake.default-snapshot-timestamp=2024-01-15T12:00:00Z
 
 `ducklake.default-snapshot-id` and `ducklake.default-snapshot-timestamp` are mutually exclusive.
 
+Temporal partition encoding options:
+
+```properties
+# default: calendar
+ducklake.temporal-partition-encoding=calendar
+
+# default: true
+ducklake.temporal-partition-encoding-read-leniency=true
+```
+
+Semantics:
+
+- `ducklake.temporal-partition-encoding` sets the strict encoding (`calendar` or `epoch`).
+- `ducklake.temporal-partition-encoding-read-leniency=true` enables safe dual-interpretation reads:
+  prune only when it is safe, i.e. both encodings exclude a file (or one encoding is impossible and the other excludes).
+- `ducklake.temporal-partition-encoding-read-leniency=false` uses strict pruning under the configured encoding only.
+
 ## Snapshot Reads (Point In Time)
 
 DuckLake read snapshot precedence is:
@@ -132,6 +149,18 @@ Notes:
 - `ducklake.test.catalog-backend` defaults to `sqlite`.
 - PostgreSQL test mode uses Testcontainers and requires a working Docker environment.
 - `TestDucklakeDeleteFileHandling` is SQLite-only (it mutates SQLite catalog files directly).
+- Current local workflow is module-scoped: run from `plugin/trino-ducklake` using `../../mvnw ...`.
+- This module disables `ReportLeakedContainers` by default during tests to avoid Podman Docker API compatibility noise
+  (`unknown container state: restarting`).
+  Re-enable it explicitly with `-DReportLeakedContainers.disabled=false` if you want leaked-container checks.
+- For faster local loops, skip expensive checks:
+
+```bash
+cd plugin/trino-ducklake
+../../mvnw -Dair.check.skip-all -Dtest=TestDucklakeIntegration test
+```
+
+`-Dair.check.skip-all` skips checkstyle/sortpom/dependency/modernizer/enforcer-style validation phases and runs tests directly.
 
 Targeted runs:
 
@@ -150,4 +179,7 @@ mvn test -Dtest=TestDucklakePageSourceProvider,TestDucklakeDeleteFileHandling
 
 # Targeted PostgreSQL backend runs
 mvn test -Dducklake.test.catalog-backend=postgresql -Dtest=TestDucklakeCatalog,TestDucklakeSplitManager
+
+# Targeted DuckDB backend runs
+mvn test -Dducklake.test.catalog-backend=duckdb -Dtest=TestDucklakeCatalog,TestDucklakeSplitManager
 ```

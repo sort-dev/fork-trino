@@ -138,9 +138,9 @@ Same precedence rule: query `AS OF` > session pin > catalog pin > current snapsh
 
 ## R4: Temporal Encoding Compatibility (Calendar + Epoch)
 
-- [ ] Add dual-encoding transform mode in partition pruning
-- [ ] Default mode: `auto` with safe pruning (never false-negative), i.e. only prune when both calendar and epoch interpretations exclude a file
-- [ ] Add explicit test cases where calendar and epoch interpretations diverge
+- [x] Add dual-encoding transform mode in partition pruning
+- [x] Default mode: `auto` with safe pruning (never false-negative), i.e. only prune when both calendar and epoch interpretations exclude a file
+- [x] Add explicit test cases where calendar and epoch interpretations diverge
 
 ## R5: Optional Session/Catalog Pinning
 
