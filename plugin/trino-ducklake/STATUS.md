@@ -8,7 +8,7 @@ The read path is fully implemented and tested.
 
 ### Data Access
 - Catalog reads from Ducklake SQL metadata tables (JDBC/HikariCP, validated with SQLite and PostgreSQL backends).
-- Snapshot-scoped reads of current snapshot, with optional session/catalog pinning.
+- Snapshot-scoped reads for current snapshot and table-version queries (`FOR VERSION AS OF`, `FOR TIMESTAMP AS OF`), with optional session/catalog pinning.
 - Parquet data files read through Trino's native Parquet reader.
 - Inlined data read directly from the metadata catalog (DuckLake's default for tables with <=10 rows).
 - Merge-on-read delete file filtering.
@@ -30,8 +30,8 @@ The read path is fully implemented and tested.
   These types are readable but lack type-specific operators and functions.
 
 ### Test Coverage
-- 197 tests, 0 failures across 7 test classes.
-- `TestDucklakeIntegration`: 136 end-to-end SQL tests via `DucklakeQueryRunner`.
+- 220 tests, 0 failures (1 skipped SQLite-only test) across 9 test classes.
+- `TestDucklakeIntegration`: 142 end-to-end SQL tests via `DucklakeQueryRunner`.
 - 15 test tables covering primitives, arrays, structs, maps, partitioning (identity/temporal/daily), schema evolution, NULLs, empty tables, delete files, multi-file scans, complex NULL patterns, and inlined data.
 - Unit tests for catalog, split manager, partition pruning, page source provider, delete file handling, plugin wiring.
 - Test backend matrix:
@@ -45,8 +45,13 @@ The read path is fully implemented and tested.
 DuckDB's ducklake extension writes literal calendar values (e.g., year=2023, month=6) to `ducklake_file_partition_value` instead of the epoch-based values described in the spec (e.g., year=53, month=641). Our implementation follows DuckDB's actual behavior. If the spec is updated or DuckDB changes behavior in a future release, this code will need reconciliation. See [REPORT_DUCKLAKE_PARTITION_PROB.md](REPORT_DUCKLAKE_PARTITION_PROB.md) and [duckdb/ducklake-web#312](https://github.com/duckdb/ducklake-web/issues/312).
 
 ### Time travel
-`FOR SYSTEM_TIME AS OF` / `FOR SYSTEM_VERSION AS OF` are not implemented yet. Table-version query arguments are rejected.
-Session/catalog snapshot pinning is implemented (`ducklake.read_snapshot_id`, `ducklake.read_snapshot_timestamp`, `ducklake.default-snapshot-id`, `ducklake.default-snapshot-timestamp`). Snapshot resolver precedence is `query > session > catalog > current`, with query-level wiring still pending table-version support.
+`FOR VERSION AS OF` and `FOR TIMESTAMP AS OF` are implemented through Trino table-version arguments in `DucklakeMetadata#getTableHandle(...)`.
+Supported version pointer types:
+- `TARGET_ID`: `tinyint`, `smallint`, `integer`, `bigint` (mapped to snapshot ID lookup)
+- `TEMPORAL`: `date`, `timestamp`, `timestamp with time zone` (resolved to latest snapshot at or before pointer time)
+
+Precise errors are returned for unsupported pointer types, missing snapshot IDs, and timestamps earlier than first snapshot.
+Session/catalog snapshot pinning remains implemented (`ducklake.read_snapshot_id`, `ducklake.read_snapshot_timestamp`, `ducklake.default-snapshot-id`, `ducklake.default-snapshot-timestamp`) with precedence `query > session > catalog > current`.
 
 ### Data inlining
 Trino now supports mixed-mode reads when a snapshot has both active Parquet files and active inlined rows: split planning emits both split types and reads them as a union. Merge-on-read delete filtering remains in place for Parquet splits, while inlined row visibility is still governed by `begin_snapshot`/`end_snapshot` filtering in metadata reads.

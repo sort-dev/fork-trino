@@ -42,8 +42,16 @@ import io.trino.spi.statistics.ColumnStatistics;
 import io.trino.spi.statistics.DoubleRange;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
+import io.trino.spi.type.LongTimestamp;
+import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
 
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -53,6 +61,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -60,7 +69,11 @@ import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
+import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
+import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MICROSECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static java.lang.Math.floorDiv;
+import static java.lang.Math.floorMod;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -103,12 +116,25 @@ public class DucklakeMetadata
             Optional<ConnectorTableVersion> endVersion)
     {
         requireNonNull(tableName, "tableName is null");
+        requireNonNull(startVersion, "startVersion is null");
+        requireNonNull(endVersion, "endVersion is null");
 
-        if (startVersion.isPresent() || endVersion.isPresent()) {
-            throw new TrinoException(NOT_SUPPORTED, "DuckLake time-travel queries are not implemented yet");
+        if (startVersion.isPresent() && endVersion.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "DuckLake does not support version ranges; provide only one table version bound");
         }
 
-        long snapshotId = snapshotResolver.resolveSnapshotId(session);
+        Optional<ConnectorTableVersion> queryVersion = endVersion.isPresent() ? endVersion : startVersion;
+        OptionalLong querySnapshotId = OptionalLong.empty();
+        Optional<Instant> querySnapshotTimestamp = Optional.empty();
+        if (queryVersion.isPresent()) {
+            ConnectorTableVersion version = queryVersion.get();
+            switch (version.getPointerType()) {
+                case TARGET_ID -> querySnapshotId = OptionalLong.of(getSnapshotIdFromVersion(version));
+                case TEMPORAL -> querySnapshotTimestamp = Optional.of(getSnapshotTimestampFromVersion(session, version));
+            }
+        }
+
+        long snapshotId = snapshotResolver.resolveSnapshotId(session, querySnapshotId, querySnapshotTimestamp);
 
         Optional<DucklakeTable> table = catalog.getTable(tableName, snapshotId);
         if (table.isEmpty()) {
@@ -120,6 +146,45 @@ public class DucklakeMetadata
                 tableName.getTableName(),
                 table.get().tableId(),
                 snapshotId);
+    }
+
+    private static long getSnapshotIdFromVersion(ConnectorTableVersion version)
+    {
+        Type versionType = version.getVersionType();
+        if (versionType == SMALLINT || versionType == TINYINT || versionType == INTEGER || versionType == BIGINT) {
+            return ((Number) version.getVersion()).longValue();
+        }
+
+        throw new TrinoException(NOT_SUPPORTED, "Unsupported type for table version: " + versionType.getDisplayName());
+    }
+
+    private static Instant getSnapshotTimestampFromVersion(ConnectorSession session, ConnectorTableVersion version)
+    {
+        Type versionType = version.getVersionType();
+        if (versionType.equals(DATE)) {
+            return LocalDate.ofEpochDay((Long) version.getVersion())
+                    .atStartOfDay()
+                    .atZone(session.getTimeZoneKey().getZoneId())
+                    .toInstant();
+        }
+        if (versionType instanceof TimestampType timestampVersionType) {
+            long epochMicrosUtc = timestampVersionType.isShort()
+                    ? (long) version.getVersion()
+                    : ((LongTimestamp) version.getVersion()).getEpochMicros();
+            long epochSecondUtc = floorDiv(epochMicrosUtc, MICROSECONDS_PER_SECOND);
+            int nanosOfSecond = (int) floorMod(epochMicrosUtc, MICROSECONDS_PER_SECOND) * NANOSECONDS_PER_MICROSECOND;
+            return LocalDateTime.ofEpochSecond(epochSecondUtc, nanosOfSecond, ZoneOffset.UTC)
+                    .atZone(session.getTimeZoneKey().getZoneId())
+                    .toInstant();
+        }
+        if (versionType instanceof TimestampWithTimeZoneType timestampWithTimeZoneType) {
+            long epochMillis = timestampWithTimeZoneType.isShort()
+                    ? unpackMillisUtc((long) version.getVersion())
+                    : ((LongTimestampWithTimeZone) version.getVersion()).getEpochMillis();
+            return Instant.ofEpochMilli(epochMillis);
+        }
+
+        throw new TrinoException(NOT_SUPPORTED, "Unsupported type for temporal table version: " + versionType.getDisplayName());
     }
 
     @Override

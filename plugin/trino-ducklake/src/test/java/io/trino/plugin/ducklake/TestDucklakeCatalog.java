@@ -16,11 +16,17 @@ package io.trino.plugin.ducklake;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeColumnStats;
+import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
 import io.trino.plugin.ducklake.catalog.DucklakeSchema;
 import io.trino.plugin.ducklake.catalog.DucklakeSnapshot;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
 import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.ConnectorTableVersion;
+import io.trino.spi.connector.PointerType;
+import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.statistics.ColumnStatistics;
 import io.trino.spi.statistics.DoubleRange;
 import org.junit.jupiter.api.AfterEach;
@@ -31,8 +37,11 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
+import static io.trino.spi.type.BigintType.BIGINT;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Tests for Ducklake catalog reading from DuckDB-generated test metadata.
@@ -422,6 +431,41 @@ public class TestDucklakeCatalog
         assertThat(stats.getRowCount().getValue()).isEqualTo(3.0);
     }
 
+    @Test
+    public void testGetTableHandleUsesStartVersionWhenEndVersionMissing()
+    {
+        long historicalSnapshotId = getSchemaEvolutionHistoricalSnapshotId();
+        DucklakeMetadata metadata = createMetadata();
+
+        ConnectorTableHandle tableHandle = metadata.getTableHandle(
+                io.trino.testing.connector.TestingConnectorSession.SESSION,
+                new SchemaTableName("test_schema", "schema_evolution_table"),
+                Optional.of(new ConnectorTableVersion(PointerType.TARGET_ID, BIGINT, historicalSnapshotId)),
+                Optional.empty());
+
+        assertThat(tableHandle).isInstanceOf(DucklakeTableHandle.class);
+        assertThat(((DucklakeTableHandle) tableHandle).snapshotId()).isEqualTo(historicalSnapshotId);
+    }
+
+    @Test
+    public void testGetTableHandleRejectsVersionRanges()
+    {
+        long historicalSnapshotId = getSchemaEvolutionHistoricalSnapshotId();
+        long currentSnapshotId = catalog.getCurrentSnapshotId();
+        DucklakeMetadata metadata = createMetadata();
+
+        ConnectorTableVersion startVersion = new ConnectorTableVersion(PointerType.TARGET_ID, BIGINT, historicalSnapshotId);
+        ConnectorTableVersion endVersion = new ConnectorTableVersion(PointerType.TARGET_ID, BIGINT, currentSnapshotId);
+
+        assertThatThrownBy(() -> metadata.getTableHandle(
+                io.trino.testing.connector.TestingConnectorSession.SESSION,
+                new SchemaTableName("test_schema", "schema_evolution_table"),
+                Optional.of(startVersion),
+                Optional.of(endVersion)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("does not support version ranges");
+    }
+
     private DucklakeSchema getSchema(String schemaName, long snapshotId)
     {
         return catalog.listSchemas(snapshotId).stream()
@@ -446,5 +490,36 @@ public class TestDucklakeCatalog
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("Missing column: " + columnName))
                 .columnId();
+    }
+
+    private DucklakeMetadata createMetadata()
+    {
+        DucklakeTypeConverter typeConverter = new DucklakeTypeConverter(
+                io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER);
+        return new DucklakeMetadata(catalog, typeConverter);
+    }
+
+    private long getSchemaEvolutionHistoricalSnapshotId()
+    {
+        long currentSnapshotId = catalog.getCurrentSnapshotId();
+        DucklakeTable schemaEvolutionTable = getTable("test_schema", "schema_evolution_table", currentSnapshotId);
+        long historicalSnapshotId = -1;
+        for (long snapshotId = currentSnapshotId; snapshotId >= 1; snapshotId--) {
+            if (catalog.getSnapshot(snapshotId).isEmpty()) {
+                continue;
+            }
+            if (catalog.getTable(new SchemaTableName("test_schema", "schema_evolution_table"), snapshotId).isEmpty()) {
+                continue;
+            }
+            long recordCount = catalog.getDataFiles(schemaEvolutionTable.tableId(), snapshotId).stream()
+                    .mapToLong(DucklakeDataFile::recordCount)
+                    .sum();
+            if (recordCount == 2) {
+                historicalSnapshotId = snapshotId;
+                break;
+            }
+        }
+        assertThat(historicalSnapshotId).isGreaterThan(0);
+        return historicalSnapshotId;
     }
 }

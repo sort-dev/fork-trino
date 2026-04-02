@@ -20,7 +20,7 @@ Define and implement a Trino-native read surface for DuckLake that supports:
 ## Current State (as implemented)
 
 - Current-snapshot reads plus optional snapshot pinning through session/catalog defaults.
-- `DucklakeMetadata#getTableHandle(...)` still does not convert Trino table-version arguments yet (`FOR VERSION/TIMESTAMP AS OF` remains pending in R2).
+- `DucklakeMetadata#getTableHandle(...)` now converts Trino table-version arguments (`FOR VERSION/TIMESTAMP AS OF`) to DuckLake snapshot resolution inputs.
 - Read path is strong on pruning and compatibility for present snapshot:
   - file stats pruning
   - partition pruning
@@ -123,9 +123,9 @@ Same precedence rule: query `AS OF` > session pin > catalog pin > current snapsh
 
 ## R2: Table Version Support
 
-- [ ] Implement `startVersion` handling in `DucklakeMetadata#getTableHandle(...)`
-- [ ] Convert Trino `ConnectorTableVersion` values to snapshot IDs
-- [ ] Return precise errors for invalid versions/timestamps
+- [x] Implement `startVersion` handling in `DucklakeMetadata#getTableHandle(...)`
+- [x] Convert Trino `ConnectorTableVersion` values to snapshot IDs
+- [x] Return precise errors for invalid versions/timestamps
 
 ## R3: Metadata Tables (`$` naming, Iceberg-style first)
 

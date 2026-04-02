@@ -13,12 +13,17 @@
  */
 package io.trino.plugin.ducklake;
 
+import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
+import io.trino.plugin.ducklake.catalog.DucklakeTable;
+import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
+import io.trino.spi.connector.SchemaTableName;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.MaterializedRow;
 import io.trino.testing.QueryRunner;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -731,6 +736,48 @@ public class TestDucklakeIntegration
         assertThat(result.getTypes()).hasSize(3);
     }
 
+    // ==================== Time travel ====================
+
+    @Test
+    public void testForVersionAsOfReadsHistoricalSnapshot()
+            throws Exception
+    {
+        HistoricalSnapshot historicalSnapshot = getSchemaEvolutionHistoricalSnapshot();
+        assertQuery("SELECT count(*) FROM schema_evolution_table", "VALUES 4");
+        assertQuery(
+                "SELECT count(*) FROM schema_evolution_table FOR VERSION AS OF " + historicalSnapshot.snapshotId(),
+                "VALUES 2");
+        assertQuery(
+                "SELECT count(*) FROM schema_evolution_table FOR VERSION AS OF CAST(" + historicalSnapshot.snapshotId() + " AS INTEGER)",
+                "VALUES 2");
+    }
+
+    @Test
+    public void testForTimestampAsOfReadsHistoricalSnapshot()
+            throws Exception
+    {
+        HistoricalSnapshot historicalSnapshot = getSchemaEvolutionHistoricalSnapshot();
+        assertQuery(
+                "SELECT count(*) FROM schema_evolution_table FOR TIMESTAMP AS OF from_iso8601_timestamp('" + historicalSnapshot.snapshotTime() + "')",
+                "VALUES 2");
+    }
+
+    @Test
+    public void testVersionedReadsReturnPreciseErrors()
+            throws Exception
+    {
+        HistoricalSnapshot historicalSnapshot = getSchemaEvolutionHistoricalSnapshot();
+        assertQueryFails(
+                "SELECT count(*) FROM schema_evolution_table FOR VERSION AS OF 'not-a-snapshot-id'",
+                "Unsupported type for table version: varchar.*");
+        assertQueryFails(
+                "SELECT count(*) FROM schema_evolution_table FOR VERSION AS OF " + (historicalSnapshot.snapshotId() + 10_000_000),
+                "DuckLake snapshot ID does not exist: .*");
+        assertQueryFails(
+                "SELECT count(*) FROM schema_evolution_table FOR TIMESTAMP AS OF TIMESTAMP '1970-01-01 00:00:00 UTC'",
+                "No DuckLake snapshot exists at or before timestamp: .*");
+    }
+
     // ==================== Aggregation table ====================
 
     @Test
@@ -1394,4 +1441,43 @@ public class TestDucklakeIntegration
         assertQuery("SELECT COUNT(*) FROM mixed_inline_table WHERE id < 10", "VALUES 2");
         assertQuery("SELECT COUNT(*) FROM mixed_inline_table WHERE id >= 100", "VALUES 5");
     }
+
+    private HistoricalSnapshot getSchemaEvolutionHistoricalSnapshot()
+            throws Exception
+    {
+        JdbcDucklakeCatalog catalog = new JdbcDucklakeCatalog(DucklakeTestCatalogEnvironment.createDucklakeConfig());
+        try {
+            long currentSnapshotId = catalog.getCurrentSnapshotId();
+            DucklakeTable table = catalog.getTable(new SchemaTableName("test_schema", "schema_evolution_table"), currentSnapshotId)
+                    .orElseThrow(() -> new AssertionError("Missing schema_evolution_table"));
+            long historicalSnapshotId = -1;
+            for (long snapshotId = currentSnapshotId; snapshotId >= 1; snapshotId--) {
+                if (catalog.getSnapshot(snapshotId).isEmpty()) {
+                    continue;
+                }
+                if (catalog.getTable(new SchemaTableName("test_schema", "schema_evolution_table"), snapshotId).isEmpty()) {
+                    continue;
+                }
+                long recordCount = catalog.getDataFiles(table.tableId(), snapshotId).stream()
+                        .mapToLong(DucklakeDataFile::recordCount)
+                        .sum();
+                if (recordCount == 2) {
+                    historicalSnapshotId = snapshotId;
+                    break;
+                }
+            }
+
+            assertThat(historicalSnapshotId).isGreaterThan(0);
+            long selectedSnapshotId = historicalSnapshotId;
+            Instant historicalSnapshotTime = catalog.getSnapshot(selectedSnapshotId)
+                    .orElseThrow(() -> new AssertionError("Missing snapshot: " + selectedSnapshotId))
+                    .snapshotTime();
+            return new HistoricalSnapshot(selectedSnapshotId, historicalSnapshotTime);
+        }
+        finally {
+            catalog.close();
+        }
+    }
+
+    private record HistoricalSnapshot(long snapshotId, Instant snapshotTime) {}
 }
