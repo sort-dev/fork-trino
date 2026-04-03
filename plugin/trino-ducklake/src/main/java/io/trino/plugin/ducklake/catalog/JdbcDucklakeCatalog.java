@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -813,6 +814,256 @@ public class JdbcDucklakeCatalog
         catch (SQLException e) {
             throw new RuntimeException("Failed to get data path from ducklake_metadata", e);
         }
+    }
+
+    // ==================== View operations ====================
+
+    @Override
+    public List<DucklakeView> listViews(long schemaId, long snapshotId)
+    {
+        String sql = "SELECT view_id, view_uuid, begin_snapshot, end_snapshot, schema_id, view_name, dialect, sql, column_aliases " +
+                     "FROM ducklake_view " +
+                     "WHERE schema_id = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)";
+
+        List<DucklakeView> views = new ArrayList<>();
+
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setLong(1, schemaId);
+            stmt.setLong(2, snapshotId);
+            stmt.setLong(3, snapshotId);
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    views.add(readView(rs));
+                }
+            }
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Failed to list views for schema: " + schemaId + " at snapshot: " + snapshotId, e);
+        }
+
+        return views;
+    }
+
+    @Override
+    public Optional<DucklakeView> getView(String schemaName, String viewName, long snapshotId)
+    {
+        Optional<DucklakeSchema> schema = getSchema(schemaName, snapshotId);
+        if (schema.isEmpty()) {
+            return Optional.empty();
+        }
+
+        String sql = "SELECT view_id, view_uuid, begin_snapshot, end_snapshot, schema_id, view_name, dialect, sql, column_aliases " +
+                     "FROM ducklake_view " +
+                     "WHERE schema_id = ? AND view_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)";
+
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setLong(1, schema.get().schemaId());
+            stmt.setString(2, viewName);
+            stmt.setLong(3, snapshotId);
+            stmt.setLong(4, snapshotId);
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return Optional.of(readView(rs));
+                }
+                return Optional.empty();
+            }
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Failed to get view: " + schemaName + "." + viewName + " at snapshot: " + snapshotId, e);
+        }
+    }
+
+    @Override
+    public void createView(String schemaName, String viewName, String viewSql, String dialect, String columnAliases)
+    {
+        // Lightweight snapshot commit for view creation.
+        // TODO: Refactor into M0 write transaction abstraction when implemented.
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                // 1. Read current snapshot
+                long currentSnapshotId;
+                long nextCatalogId;
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "SELECT snapshot_id, next_catalog_id FROM ducklake_snapshot WHERE snapshot_id = (SELECT max(snapshot_id) FROM ducklake_snapshot)")) {
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new IllegalStateException("No snapshots found");
+                        }
+                        currentSnapshotId = rs.getLong("snapshot_id");
+                        nextCatalogId = rs.getLong("next_catalog_id");
+                    }
+                }
+
+                long newSnapshotId = currentSnapshotId + 1;
+                long viewId = nextCatalogId;
+
+                // 2. Resolve schema_id
+                long schemaId;
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "SELECT schema_id FROM ducklake_schema WHERE schema_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                    stmt.setString(1, schemaName);
+                    stmt.setLong(2, currentSnapshotId);
+                    stmt.setLong(3, currentSnapshotId);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new RuntimeException("Schema not found: " + schemaName);
+                        }
+                        schemaId = rs.getLong("schema_id");
+                    }
+                }
+
+                // 3. Create new snapshot
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "INSERT INTO ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id) " +
+                        "SELECT ?, CURRENT_TIMESTAMP, schema_version, ?, next_file_id " +
+                        "FROM ducklake_snapshot WHERE snapshot_id = ?")) {
+                    stmt.setLong(1, newSnapshotId);
+                    stmt.setLong(2, nextCatalogId + 1);
+                    stmt.setLong(3, currentSnapshotId);
+                    stmt.executeUpdate();
+                }
+
+                // 4. Insert snapshot changes
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "INSERT INTO ducklake_snapshot_changes (snapshot_id, changes_made) VALUES (?, ?)")) {
+                    stmt.setLong(1, newSnapshotId);
+                    stmt.setString(2, "created_view:" + viewName);
+                    stmt.executeUpdate();
+                }
+
+                // 5. Insert view row
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "INSERT INTO ducklake_view (view_id, view_uuid, begin_snapshot, end_snapshot, schema_id, view_name, dialect, sql, column_aliases) " +
+                        "VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)")) {
+                    stmt.setLong(1, viewId);
+                    stmt.setString(2, UUID.randomUUID().toString());
+                    stmt.setLong(3, newSnapshotId);
+                    stmt.setLong(4, schemaId);
+                    stmt.setString(5, viewName);
+                    stmt.setString(6, dialect);
+                    stmt.setString(7, viewSql);
+                    stmt.setString(8, columnAliases);
+                    stmt.executeUpdate();
+                }
+
+                conn.commit();
+            }
+            catch (Exception e) {
+                conn.rollback();
+                throw new RuntimeException("Failed to create view: " + schemaName + "." + viewName, e);
+            }
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Failed to create view: " + schemaName + "." + viewName, e);
+        }
+    }
+
+    @Override
+    public void dropView(String schemaName, String viewName)
+    {
+        // Lightweight snapshot commit for view drop.
+        // TODO: Refactor into M0 write transaction abstraction when implemented.
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                // 1. Read current snapshot
+                long currentSnapshotId;
+                long nextCatalogId;
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "SELECT snapshot_id, next_catalog_id FROM ducklake_snapshot WHERE snapshot_id = (SELECT max(snapshot_id) FROM ducklake_snapshot)")) {
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new IllegalStateException("No snapshots found");
+                        }
+                        currentSnapshotId = rs.getLong("snapshot_id");
+                        nextCatalogId = rs.getLong("next_catalog_id");
+                    }
+                }
+
+                long newSnapshotId = currentSnapshotId + 1;
+
+                // 2. Resolve schema_id
+                long schemaId;
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "SELECT schema_id FROM ducklake_schema WHERE schema_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                    stmt.setString(1, schemaName);
+                    stmt.setLong(2, currentSnapshotId);
+                    stmt.setLong(3, currentSnapshotId);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) {
+                            throw new RuntimeException("Schema not found: " + schemaName);
+                        }
+                        schemaId = rs.getLong("schema_id");
+                    }
+                }
+
+                // 3. Create new snapshot
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "INSERT INTO ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id) " +
+                        "SELECT ?, CURRENT_TIMESTAMP, schema_version, ?, next_file_id " +
+                        "FROM ducklake_snapshot WHERE snapshot_id = ?")) {
+                    stmt.setLong(1, newSnapshotId);
+                    stmt.setLong(2, nextCatalogId);
+                    stmt.setLong(3, currentSnapshotId);
+                    stmt.executeUpdate();
+                }
+
+                // 4. Insert snapshot changes
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "INSERT INTO ducklake_snapshot_changes (snapshot_id, changes_made) VALUES (?, ?)")) {
+                    stmt.setLong(1, newSnapshotId);
+                    stmt.setString(2, "dropped_view:" + viewName);
+                    stmt.executeUpdate();
+                }
+
+                // 5. Set end_snapshot on existing view
+                try (PreparedStatement stmt = conn.prepareStatement(
+                        "UPDATE ducklake_view SET end_snapshot = ? " +
+                        "WHERE schema_id = ? AND view_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                    stmt.setLong(1, newSnapshotId);
+                    stmt.setLong(2, schemaId);
+                    stmt.setString(3, viewName);
+                    stmt.setLong(4, currentSnapshotId);
+                    stmt.setLong(5, currentSnapshotId);
+                    int updated = stmt.executeUpdate();
+                    if (updated == 0) {
+                        throw new RuntimeException("View not found: " + schemaName + "." + viewName);
+                    }
+                }
+
+                conn.commit();
+            }
+            catch (Exception e) {
+                conn.rollback();
+                throw new RuntimeException("Failed to drop view: " + schemaName + "." + viewName, e);
+            }
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Failed to drop view: " + schemaName + "." + viewName, e);
+        }
+    }
+
+    private DucklakeView readView(ResultSet rs)
+            throws SQLException
+    {
+        long endSnapshotRaw = rs.getLong("end_snapshot");
+        OptionalLong endSnapshot = rs.wasNull() ? OptionalLong.empty() : OptionalLong.of(endSnapshotRaw);
+
+        return new DucklakeView(
+                rs.getLong("view_id"),
+                rs.getString("view_uuid"),
+                rs.getLong("schema_id"),
+                rs.getString("view_name"),
+                rs.getString("sql"),
+                rs.getString("dialect"),
+                getStringOptional(rs, "column_aliases"),
+                rs.getLong("begin_snapshot"),
+                endSnapshot);
     }
 
     @Override

@@ -296,11 +296,11 @@ Iceberg connector implements all view methods by delegating to `catalog.listView
 
 ### Test Plan
 
-- [ ] Add DuckDB-created views to `DucklakeCatalogGenerator` (at least one simple view and one with column aliases)
-- [ ] Test `listViews` returns views from catalog
-- [ ] Test `getView` returns `ConnectorViewDefinition` with correct SQL and columns
+- [x] Add DuckDB-created views to `DucklakeCatalogGenerator` (simple_view, aliased_view, duckdb_specific_view)
+- [x] Test `listViews` returns views from catalog
+- [x] Test `getView` returns `ConnectorViewDefinition` with correct SQL and columns
 - [ ] Test view snapshot scoping (view visible at snapshot N but not N-1)
-- [ ] Test dialect filtering (DuckDB-dialect views handled gracefully)
+- [x] Test dialect filtering (DuckDB-dialect views handled gracefully)
 - [ ] Test views across all catalog backends (SQLite, PostgreSQL, DuckDB)
 
 ## Definition of Done (Read Mode)

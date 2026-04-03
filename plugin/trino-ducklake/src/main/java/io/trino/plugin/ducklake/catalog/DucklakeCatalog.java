@@ -130,6 +130,32 @@ public interface DucklakeCatalog
      */
     Optional<String> getDataPath();
 
+    // ==================== View operations ====================
+
+    /**
+     * List all views in a schema at the given snapshot
+     */
+    List<DucklakeView> listViews(long schemaId, long snapshotId);
+
+    /**
+     * Get a specific view by name at the given snapshot
+     */
+    Optional<DucklakeView> getView(String schemaName, String viewName, long snapshotId);
+
+    /**
+     * Create a new view in the catalog.
+     * Creates a new snapshot and inserts the view row atomically.
+     * Lightweight write operation — will be refactored into M0 transaction abstraction later.
+     */
+    void createView(String schemaName, String viewName, String sql, String dialect, String columnAliases);
+
+    /**
+     * Drop an existing view from the catalog.
+     * Creates a new snapshot and sets end_snapshot on the view row atomically.
+     * Lightweight write operation — will be refactored into M0 transaction abstraction later.
+     */
+    void dropView(String schemaName, String viewName);
+
     /**
      * Close any resources (JDBC connections, etc)
      */

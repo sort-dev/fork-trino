@@ -18,6 +18,7 @@ import io.airlift.log.Logger;
 import io.airlift.log.Logging;
 import io.trino.testing.DistributedQueryRunner;
 
+import java.nio.file.Path;
 import java.util.Map;
 
 import static io.airlift.testing.Closeables.closeAllSuppress;
@@ -38,6 +39,7 @@ public final class DucklakeQueryRunner
             extends DistributedQueryRunner.Builder<Builder>
     {
         private final ImmutableMap.Builder<String, String> connectorProperties = ImmutableMap.builder();
+        private String isolatedCatalogName;
 
         private Builder()
         {
@@ -53,15 +55,37 @@ public final class DucklakeQueryRunner
             return self();
         }
 
+        /**
+         * Use an isolated catalog (fresh SQLite DB) instead of the shared test catalog.
+         * Each isolated catalog gets its own SQLite file and data directory,
+         * preventing cross-test interference from write operations.
+         */
+        public Builder useIsolatedCatalog(String testName)
+        {
+            this.isolatedCatalogName = testName;
+            return self();
+        }
+
         @Override
         public DistributedQueryRunner build()
                 throws Exception
         {
             DistributedQueryRunner queryRunner = super.build();
             try {
-                // Build connector properties
+                Map<String, String> baseProperties;
+                if (isolatedCatalogName != null) {
+                    Path catalogPath = DucklakeCatalogGenerator.generateIsolatedSqliteCatalog(isolatedCatalogName);
+                    Path dataDir = catalogPath.getParent().resolve("data");
+                    baseProperties = ImmutableMap.of(
+                            "ducklake.catalog.database-url", "jdbc:sqlite:" + catalogPath.toAbsolutePath(),
+                            "ducklake.data-path", dataDir.toAbsolutePath().toString());
+                }
+                else {
+                    baseProperties = DucklakeTestCatalogEnvironment.getConnectorProperties();
+                }
+
                 Map<String, String> properties = ImmutableMap.<String, String>builder()
-                        .putAll(DucklakeTestCatalogEnvironment.getConnectorProperties())
+                        .putAll(baseProperties)
                         .put("fs.hadoop.enabled", "true")
                         .putAll(connectorProperties.buildOrThrow())
                         .buildOrThrow();

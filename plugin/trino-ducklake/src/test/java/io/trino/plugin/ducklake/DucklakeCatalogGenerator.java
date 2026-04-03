@@ -106,7 +106,26 @@ public final class DucklakeCatalogGenerator
                 "catalog database: " + server.getJdbcUrl());
     }
 
-    private static void generateTestCatalog(
+    /**
+     * Generate an isolated SQLite-based test catalog at the given directory.
+     * Each call creates a fresh catalog with all test tables and views.
+     * Use this for write tests that need their own catalog to avoid cross-test interference.
+     */
+    public static Path generateIsolatedSqliteCatalog(String testName)
+            throws Exception
+    {
+        Path catalogDir = TARGET_DIR.resolve("test-catalog-isolated-" + testName);
+        Path catalogPath = catalogDir.resolve("catalog.db");
+        generateTestCatalog(
+                "sqlite",
+                catalogDir,
+                "ducklake:sqlite:" + catalogPath.toAbsolutePath(),
+                List.of("sqlite"),
+                "isolated catalog for " + testName);
+        return catalogPath;
+    }
+
+    static void generateTestCatalog(
             String backendName,
             Path catalogDirectory,
             String ducklakeAttachUri,
@@ -634,6 +653,29 @@ public final class DucklakeCatalogGenerator
                         (104, 'parquet', 104.0)
                     """);
 
+            // ==================== Views ====================
+
+            // View 1: Simple view over simple_table (DuckDB dialect, but SQL compatible with Trino)
+            System.out.println("Creating simple_view (compatible DuckDB view)...");
+            stmt.execute("""
+                    CREATE VIEW ducklake_db.test_schema.simple_view AS
+                        SELECT id, name, price FROM ducklake_db.test_schema.simple_table WHERE active = true
+                    """);
+
+            // View 2: View with column aliases
+            System.out.println("Creating aliased_view (column aliases)...");
+            stmt.execute("""
+                    CREATE VIEW ducklake_db.test_schema.aliased_view (product_id, product_name, product_price) AS
+                        SELECT id, name, price FROM ducklake_db.test_schema.simple_table
+                    """);
+
+            // View 3: View with DuckDB-specific syntax (list_sort is DuckDB-only)
+            System.out.println("Creating duckdb_specific_view (DuckDB-only syntax)...");
+            stmt.execute("""
+                    CREATE VIEW ducklake_db.test_schema.duckdb_specific_view AS
+                        SELECT id, product_name, list_sort(tags) as sorted_tags FROM ducklake_db.test_schema.array_table
+                    """);
+
             // Detach WITHOUT checkpoint — inlined data stays in SQLite metadata
             System.out.println("Detaching catalog (no checkpoint — inlined data preserved)...");
             stmt.execute("DETACH ducklake_db");
@@ -664,6 +706,11 @@ public final class DucklakeCatalogGenerator
             System.out.println("  - test_schema.inlined_table (3 rows, data inlined in metadata catalog)");
             System.out.println("  - test_schema.inlined_nullable_table (3 rows, inlined data with NULLs)");
             System.out.println("  - test_schema.mixed_inline_table (7 rows, 2 inlined + 5 Parquet in same snapshot)");
+            System.out.println();
+            System.out.println("Views created:");
+            System.out.println("  - test_schema.simple_view (SELECT from simple_table WHERE active=true, DuckDB dialect)");
+            System.out.println("  - test_schema.aliased_view (column aliases: product_id/product_name/product_price, DuckDB dialect)");
+            System.out.println("  - test_schema.duckdb_specific_view (DuckDB-only list_sort function, DuckDB dialect)");
         }
 
         System.out.println();

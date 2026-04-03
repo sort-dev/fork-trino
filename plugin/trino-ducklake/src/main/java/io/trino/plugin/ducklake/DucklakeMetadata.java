@@ -15,6 +15,9 @@ package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.json.JsonCodec;
+import io.airlift.json.JsonCodecFactory;
+import io.airlift.log.Logger;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeColumnStats;
@@ -24,6 +27,7 @@ import io.trino.plugin.ducklake.catalog.DucklakePartitionSpec;
 import io.trino.plugin.ducklake.catalog.DucklakeSchema;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
 import io.trino.plugin.ducklake.catalog.DucklakeTableStats;
+import io.trino.plugin.ducklake.catalog.DucklakeView;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -32,10 +36,12 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
+import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
+import io.trino.spi.connector.ViewNotFoundException;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.ColumnStatistics;
@@ -81,12 +87,15 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Metadata implementation for Ducklake connector.
- * Provides read-only access to Ducklake tables via SQL catalog.
+ * Provides access to Ducklake tables and views via SQL catalog.
  */
 public class DucklakeMetadata
         implements ConnectorMetadata
 {
+    private static final Logger log = Logger.get(DucklakeMetadata.class);
     private static final String METADATA_TABLE_SEPARATOR = "$";
+    private static final JsonCodec<ConnectorViewDefinition> VIEW_CODEC = new JsonCodecFactory().jsonCodec(ConnectorViewDefinition.class);
+    private static final String TRINO_VIEW_DIALECT = "sortdev/trino";
 
     private final DucklakeCatalog catalog;
     private final DucklakeTypeConverter typeConverter;
@@ -704,4 +713,149 @@ public class DucklakeMetadata
     }
 
     private record MetadataTableName(String baseTableName, DucklakeMetadataTableType metadataTableType) {}
+
+    // ==================== View operations ====================
+
+    @Override
+    public List<SchemaTableName> listViews(ConnectorSession session, Optional<String> schemaName)
+    {
+        long snapshotId = snapshotResolver.resolveSnapshotId(session);
+
+        if (schemaName.isPresent()) {
+            Optional<DucklakeSchema> schema = catalog.getSchema(schemaName.get(), snapshotId);
+            if (schema.isEmpty()) {
+                return ImmutableList.of();
+            }
+            return catalog.listViews(schema.get().schemaId(), snapshotId).stream()
+                    .filter(view -> isViewAccessible(view))
+                    .map(view -> new SchemaTableName(schemaName.get(), view.viewName()))
+                    .collect(toImmutableList());
+        }
+
+        ImmutableList.Builder<SchemaTableName> views = ImmutableList.builder();
+        for (DucklakeSchema schema : catalog.listSchemas(snapshotId)) {
+            for (DucklakeView view : catalog.listViews(schema.schemaId(), snapshotId)) {
+                if (isViewAccessible(view)) {
+                    views.add(new SchemaTableName(schema.schemaName(), view.viewName()));
+                }
+            }
+        }
+        return views.build();
+    }
+
+    @Override
+    public Optional<ConnectorViewDefinition> getView(ConnectorSession session, SchemaTableName viewName)
+    {
+        long snapshotId = snapshotResolver.resolveSnapshotId(session);
+
+        Optional<DucklakeView> ducklakeView = catalog.getView(viewName.getSchemaName(), viewName.getTableName(), snapshotId);
+        if (ducklakeView.isEmpty()) {
+            return Optional.empty();
+        }
+
+        DucklakeView view = ducklakeView.get();
+        if (!isViewAccessible(view)) {
+            return Optional.empty();
+        }
+
+        return decodeTrinoView(view, viewName);
+    }
+
+    @Override
+    public Map<SchemaTableName, ConnectorViewDefinition> getViews(ConnectorSession session, Optional<String> schemaName)
+    {
+        long snapshotId = snapshotResolver.resolveSnapshotId(session);
+        ImmutableMap.Builder<SchemaTableName, ConnectorViewDefinition> views = ImmutableMap.builder();
+
+        List<DucklakeSchema> schemas;
+        if (schemaName.isPresent()) {
+            Optional<DucklakeSchema> schema = catalog.getSchema(schemaName.get(), snapshotId);
+            if (schema.isEmpty()) {
+                return ImmutableMap.of();
+            }
+            schemas = ImmutableList.of(schema.get());
+        }
+        else {
+            schemas = catalog.listSchemas(snapshotId);
+        }
+
+        for (DucklakeSchema schema : schemas) {
+            for (DucklakeView view : catalog.listViews(schema.schemaId(), snapshotId)) {
+                if (isViewAccessible(view)) {
+                    SchemaTableName name = new SchemaTableName(schema.schemaName(), view.viewName());
+                    decodeTrinoView(view, name).ifPresent(def -> views.put(name, def));
+                }
+            }
+        }
+
+        return views.buildOrThrow();
+    }
+
+    @Override
+    public void createView(ConnectorSession session, SchemaTableName viewName, ConnectorViewDefinition definition, Map<String, Object> viewProperties, boolean replace)
+    {
+        if (replace) {
+            long snapshotId = snapshotResolver.resolveSnapshotId(session);
+            Optional<DucklakeView> existing = catalog.getView(viewName.getSchemaName(), viewName.getTableName(), snapshotId);
+            if (existing.isPresent()) {
+                catalog.dropView(viewName.getSchemaName(), viewName.getTableName());
+            }
+        }
+
+        // Store the original SQL in the sql field (spec-compliant).
+        // Store the full ConnectorViewDefinition as JSON in column_aliases
+        // so we can round-trip column names and types.
+        String originalSql = definition.getOriginalSql();
+        String viewMetadataJson = VIEW_CODEC.toJson(definition);
+
+        catalog.createView(viewName.getSchemaName(), viewName.getTableName(), originalSql, TRINO_VIEW_DIALECT, viewMetadataJson);
+    }
+
+    @Override
+    public void dropView(ConnectorSession session, SchemaTableName viewName)
+    {
+        long snapshotId = snapshotResolver.resolveSnapshotId(session);
+        Optional<DucklakeView> existing = catalog.getView(viewName.getSchemaName(), viewName.getTableName(), snapshotId);
+        if (existing.isEmpty()) {
+            throw new ViewNotFoundException(viewName);
+        }
+
+        catalog.dropView(viewName.getSchemaName(), viewName.getTableName());
+    }
+
+    /**
+     * Only Trino-dialect views are currently accessible.
+     * Non-Trino dialects (e.g., duckdb) require a SQL transpiler to safely expose.
+     */
+    private boolean isViewAccessible(DucklakeView view)
+    {
+        String dialect = view.dialect().toLowerCase();
+        if (TRINO_VIEW_DIALECT.equals(dialect)) {
+            return true;
+        }
+        // Future: check viewSqlDialects set + transpiler availability
+        log.debug("Skipping view %s with non-Trino dialect: %s (transpiler not configured)", view.viewName(), dialect);
+        return false;
+    }
+
+    /**
+     * Decode a Trino-dialect view from the catalog.
+     * Column metadata is stored as JSON in the column_aliases field.
+     * Falls back to original SQL if metadata is missing or corrupt.
+     */
+    private Optional<ConnectorViewDefinition> decodeTrinoView(DucklakeView view, SchemaTableName viewName)
+    {
+        // Trino views store the full ConnectorViewDefinition as JSON in column_aliases
+        if (view.columnAliases().isPresent() && !view.columnAliases().get().isBlank()) {
+            try {
+                return Optional.of(VIEW_CODEC.fromJson(view.columnAliases().get()));
+            }
+            catch (RuntimeException e) {
+                log.warn(e, "Failed to decode Trino view metadata for %s", viewName);
+            }
+        }
+
+        log.warn("View %s has no Trino metadata in column_aliases, cannot resolve column types", viewName);
+        return Optional.empty();
+    }
 }

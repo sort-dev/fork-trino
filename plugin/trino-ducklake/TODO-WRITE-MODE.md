@@ -176,6 +176,8 @@ Plan implication: write path must be compatible with what DuckDB reads today.
 
 ## M0: Catalog Write Contract + Transaction Primitive
 
+> **Note**: A lightweight snapshot-commit helper was added in `JdbcDucklakeCatalog` for view create/drop operations (the first write-side feature, R7 in TODO-READ-MODE.md). The `createView` and `dropView` methods use ad-hoc `autoCommit=false` + manual commit/rollback on a single connection. When M0 is implemented, these methods should be refactored to use the proper write transaction abstraction instead of their current inline connection management. Look for the `TODO: Refactor into M0` comments in those methods.
+
 - [ ] Extend `DucklakeCatalog` with explicit write transaction API (not ad-hoc per statement).
 - [ ] Add JDBC-backed write transaction object in `JdbcDucklakeCatalog`:
   - single connection
