@@ -1,6 +1,6 @@
 # Ducklake Connector Status
 
-Last updated: 2026-04-01
+Last updated: 2026-04-05
 
 ## Read Side — Complete
 
@@ -64,8 +64,24 @@ Stale inlined metadata pointers remain non-fatal. If metadata references an inli
 ### Catalog backend
 Catalog implementation now routes by JDBC URL (`jdbc:sqlite:` / `jdbc:postgresql:`) with a shared JDBC code path. SQLite and PostgreSQL are both covered by tests. DuckDB-as-catalog-backend remains unverified.
 
-## Write Side — Not Implemented
+## Write Side — Partial Implementation
 
-No write operations are supported: INSERT, UPDATE, DELETE, MERGE, CREATE TABLE, DROP TABLE, ALTER TABLE, CREATE SCHEMA, DROP SCHEMA. All write attempts return "not supported" errors.
+Metadata write operations are now implemented through snapshot-scoped catalog commits:
 
-When write support is added, the recommended test approach is to extend Trino's `BaseConnectorTest` (226 standard connector methods) rather than porting DuckDB's SQLLogicTest files (which use DuckDB-specific SQL syntax).
+- Views: `CREATE VIEW`, `DROP VIEW`
+- Schemas: `CREATE SCHEMA`, `DROP SCHEMA` (non-empty schema drop rejected)
+- Tables: `CREATE TABLE`, `DROP TABLE`
+  - supports nested type metadata mapping (`ARRAY`, `ROW`, `MAP`)
+  - supports partition spec parsing from `WITH (partitioned_by = ARRAY[...])`
+  - `SAVE MODE REPLACE` remains unsupported
+
+Write operations still not implemented:
+
+- `INSERT`
+- `CREATE TABLE AS SELECT`
+- `DELETE`
+- `UPDATE`
+- `MERGE`
+- `ALTER TABLE` family
+
+Current tests still treat data writes as unsupported in `TestDucklakeIntegration`. New DDL integration coverage exists in `TestDucklakeDDLIntegration` in this branch/worktree, and broader write validation should still move toward Trino's `BaseConnectorTest` once data-write SPI paths are implemented.

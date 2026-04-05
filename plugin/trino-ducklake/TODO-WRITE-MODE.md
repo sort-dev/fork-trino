@@ -1,6 +1,6 @@
 # DuckLake Write Mode Plan (Trino Connector)
 
-Last updated: 2026-04-01
+Last updated: 2026-04-05
 
 ## Objective
 
@@ -31,34 +31,19 @@ This plan is intentionally reuse-heavy: reuse existing Trino writer infrastructu
 8. `MERGE`
 9. `ALTER TABLE` family (add/drop/rename column, partition evolution)
 
-### First Write Item: Views (Read + Write Together)
+### Views (Implemented Baseline)
 
-Views are the simplest write operation — just catalog metadata, no parquet files, partitions, or schema evolution. Good entry point for proving out the write path before tackling data writes.
+Views were the first write-side milestone and are now implemented:
 
-**Read side** (also in TODO-READ-MODE.md R7):
-- Implement `listViews`, `getView`, `isView`, `getViews` in `DucklakeMetadata`
-- Add `DucklakeView` model class, catalog query methods
-- Filter by `dialect`: only expose views with Trino-compatible SQL (dialect = 'trino' or 'sql')
-- DuckDB-dialect views are skipped with a log warning (future: transpiler)
+- Read side: `listViews`, `getView`, `isView`, `getViews` in `DucklakeMetadata`
+- Catalog model/API: `DucklakeView` + JDBC view queries
+- Dialect handling: expose Trino dialect views, skip non-Trino dialects with logging
+- Write side: `createView` and `dropView` commit snapshot-scoped catalog mutations
 
-**Write side**:
-- Implement `createView` in `DucklakeMetadata`:
-  - Store SQL with `dialect = 'trino'`
-  - INSERT into `ducklake_view` with `begin_snapshot` = new snapshot, `end_snapshot` = NULL
-  - Create new snapshot row + snapshot_changes entry (`created_view:<view_name>`)
-- Implement `dropView`:
-  - SET `end_snapshot` on existing view row
-  - New snapshot + changes entry (`dropped_view:<view_name>`)
-- Implement `renameView` (optional, lower priority)
+Still deferred for views:
 
-**Why views first**:
-- No file writing, no partition logic, no stats — pure catalog metadata mutation
-- Exercises the snapshot commit path (read current → create next → write changes)
-- Tests the write transaction abstraction from M0
-- Immediately useful — views in DuckLake are a real user feature
-- Read + write can be implemented and tested together as one unit
-
-**Depends on**: M0 (catalog write transaction abstraction) — but views are simple enough that M0 can be scoped to just what views need.
+- `renameView`
+- view comment operations
 
 ## Trino Write SQL/API Surface (Proposed)
 
@@ -176,10 +161,10 @@ Plan implication: write path must be compatible with what DuckDB reads today.
 
 ## M0: Catalog Write Contract + Transaction Primitive
 
-> **Note**: A lightweight snapshot-commit helper was added in `JdbcDucklakeCatalog` for view create/drop operations (the first write-side feature, R7 in TODO-READ-MODE.md). The `createView` and `dropView` methods use ad-hoc `autoCommit=false` + manual commit/rollback on a single connection. When M0 is implemented, these methods should be refactored to use the proper write transaction abstraction instead of their current inline connection management. Look for the `TODO: Refactor into M0` comments in those methods.
+> **Progress note**: `JdbcDucklakeCatalog` now has a shared `executeWriteTransaction(...)` helper and `DucklakeWriteTransaction` object used by view/schema/table metadata writes.
 
 - [ ] Extend `DucklakeCatalog` with explicit write transaction API (not ad-hoc per statement).
-- [ ] Add JDBC-backed write transaction object in `JdbcDucklakeCatalog`:
+- [x] Add JDBC-backed write transaction object in `JdbcDucklakeCatalog`:
   - single connection
   - `autoCommit=false`
   - explicit `commit`/`rollback`
@@ -217,22 +202,22 @@ Exit criteria:
 
 ### M2a `CREATE SCHEMA` / `DROP SCHEMA`
 
-- [ ] Implement snapshot commit helper:
+- [x] Implement snapshot commit helper:
   - read current snapshot
   - create next snapshot row
   - insert `snapshot_changes`
   - update `next_catalog_id` / `schema_version` as needed
-- [ ] Implement schema row insert/update with `begin_snapshot`/`end_snapshot`.
+- [x] Implement schema row insert/update with `begin_snapshot`/`end_snapshot`.
 
 ### M2b `CREATE TABLE` / `DROP TABLE`
 
-- [ ] Create table metadata rows:
+- [x] Create table metadata rows:
   - `ducklake_table` (path `<table_name>/`, relative path)
   - `ducklake_column` entries (flatten nested types with parent links)
   - initialize `ducklake_table_stats` (`record_count=0`, `next_row_id=0`, `file_size_bytes=0`)
   - `ducklake_schema_versions` update on schema change
-- [ ] Drop table as end-snapshot updates across relevant metadata tables (`table`, `column`, `partition_info`, `data_file`, `delete_file`, tags).
-- [ ] Keep change strings DuckDB-compatible for broad interoperability (`created_table:...`, `dropped_table:...`, etc.).
+- [x] Drop table as end-snapshot updates across relevant metadata tables (`table`, `column`, `partition_info`, `data_file`, `delete_file`, tags).
+- [x] Keep change strings DuckDB-compatible for broad interoperability (`created_table:...`, `dropped_table:...`, etc.).
 
 Exit criteria:
 
@@ -287,11 +272,12 @@ Exit criteria:
 
 ## M5: Partitioning + Type Completeness for Writes
 
-- [ ] Add table property for partition spec (expression strings), e.g. `ARRAY['region']`, `ARRAY['year(event_date)', 'month(event_date)']`.
-- [ ] Implement transform parser -> `DucklakePartitionTransform`.
-- [ ] Persist partition spec into `ducklake_partition_info` + `ducklake_partition_column`.
+- [x] Add table property for partition spec (expression strings), e.g. `ARRAY['region']`, `ARRAY['year(event_date)', 'month(event_date)']`.
+- [x] Implement transform parser -> `DucklakePartitionTransform`.
+- [x] Persist partition spec into `ducklake_partition_info` + `ducklake_partition_column`.
 - [ ] Compute partition values using current DuckDB-compatible temporal encoding.
-- [ ] Complete `DucklakeTypeConverter.toDucklakeType()` for nested types (`array`, `row`, `map`) and write-time type validation.
+- [x] Complete `DucklakeTypeConverter.toDucklakeType()` for nested types (`array`, `row`, `map`).
+- [ ] Add data-write-time type validation for insert/CTAS paths.
 
 Exit criteria:
 
@@ -382,7 +368,8 @@ Total mandatory scenarios: 9.
 
 ## Definition of Done (Write Mode v1)
 
-- [ ] DDL (`CREATE/DROP SCHEMA`, `CREATE/DROP TABLE`) implemented and validated in all three catalogs.
+- [x] DDL (`CREATE/DROP SCHEMA`, `CREATE/DROP TABLE`) implemented.
+- [ ] DDL (`CREATE/DROP SCHEMA`, `CREATE/DROP TABLE`) validated in all three catalogs.
 - [ ] `INSERT` and `CTAS` implemented and validated in all three catalogs.
 - [ ] 9-scenario interoperability matrix green.
 - [ ] No regressions on existing read-path suites.
@@ -401,8 +388,8 @@ Total mandatory scenarios: 9.
 
 ## Immediate Next 5 Tasks (first implementation sprint)
 
-1. [ ] Add write transaction abstraction to `DucklakeCatalog` and `JdbcDucklakeCatalog`.
-2. [ ] Add writable handles + `DucklakePageSinkProvider` + `DucklakePageSink` skeleton.
-3. [ ] Implement `CREATE SCHEMA` and `CREATE TABLE` metadata commits.
-4. [ ] Implement `beginInsert`/`finishInsert` for unpartitioned tables.
-5. [ ] Add first cross-engine test: `sqlite` catalog, Trino-create + Trino-insert + DuckDB-read.
+1. [ ] Add writable handles + `DucklakePageSinkProvider` + `DucklakePageSink` skeleton.
+2. [ ] Implement `beginInsert`/`finishInsert` for unpartitioned tables.
+3. [ ] Implement CTAS (`beginCreateTable` / `finishCreateTable`) using write fragments.
+4. [ ] Add/enable DDL integration tests in the standard module test suite across backends.
+5. [ ] Add first cross-engine data-write test: `sqlite` catalog, Trino-create + Trino-insert + DuckDB-read.

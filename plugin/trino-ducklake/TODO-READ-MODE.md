@@ -1,6 +1,6 @@
 # DuckLake Read Mode Plan (Trino Connector)
 
-Last updated: 2026-04-01
+Last updated: 2026-04-05
 
 ## Objective
 
@@ -215,52 +215,19 @@ Total required interoperability scenarios remain aligned with write plan matrix 
 
 ## R7: View Support (Read + Write Pair)
 
-**Note**: Views are the first write-side item. Read and write should be implemented together. See also TODO-WRITE-MODE.md "First Write Item: Views" section.
+Implemented baseline:
 
-DuckLake stores views in the `ducklake_view` catalog table with full snapshot-scoped visibility. Views created in DuckDB are currently invisible to Trino because the connector has zero view implementation.
+- `DucklakeCatalog` + `JdbcDucklakeCatalog` expose snapshot-scoped view reads.
+- `DucklakeMetadata` implements `listViews`, `getView`, `getViews`, and `isView` behavior.
+- View dialect filtering is in place: Trino-dialect views are exposed; non-Trino dialect views are skipped with logging.
+- `createView` and `dropView` are implemented as snapshot-scoped metadata writes.
 
-### Current State
+Still pending:
 
-- **DuckLake catalog schema**: `ducklake_view` table exists with columns: `view_id`, `view_uuid`, `begin_snapshot`, `end_snapshot`, `schema_id`, `view_name`, `dialect`, `sql`, `column_aliases`
-- **Trino connector**: No view methods in `DucklakeCatalog` interface, `JdbcDucklakeCatalog`, or `DucklakeMetadata`. The `ConnectorMetadata` default implementations return empty/throw NOT_SUPPORTED.
-- **DuckDB behavior**: Views are created via standard `CREATE VIEW`, stored with `dialect` field (e.g., "duckdb"), and support time-travel (begin/end snapshot scoping).
-
-### Implementation Plan (Read-Only MVP)
-
-**1. Model class**: Create `DucklakeView` record with fields: `viewId`, `viewUuid`, `viewName`, `schemaId`, `sql`, `dialect`, `columnAliases`.
-
-**2. Catalog interface** — add to `DucklakeCatalog`:
-```java
-List<DucklakeView> listViews(long schemaId, long snapshotId);
-Optional<DucklakeView> getView(String schemaName, String viewName, long snapshotId);
-```
-
-**3. JDBC implementation** — add to `JdbcDucklakeCatalog`:
-```sql
-SELECT view_id, view_uuid, view_name, dialect, sql, column_aliases
-FROM ducklake_view
-WHERE schema_id = ?
-  AND ? >= begin_snapshot
-  AND (? < end_snapshot OR end_snapshot IS NULL)
-```
-
-**4. Metadata methods** — implement in `DucklakeMetadata`:
-- `listViews(session, schemaName)` → query catalog, return `List<SchemaTableName>`
-- `getView(session, viewName)` → return `Optional<ConnectorViewDefinition>`
-- `isView(session, viewName)` → delegate to `getView`
-- `getViews(session, schemaName)` → bulk version of `getView`
-
-**5. SQL dialect challenge**: DuckLake stores the SQL body with a `dialect` field (typically "duckdb"). Options:
-- **Option A (simplest)**: Return the SQL as-is via `ConnectorViewDefinition.getOriginalSql()`. Trino will attempt to parse it — DuckDB SQL is mostly compatible but may fail on DuckDB-specific syntax.
-- **Option B (robust)**: Only expose views where `dialect = 'trino'` or `dialect = 'sql'`. Log a warning for DuckDB-dialect views. When Trino write support is added, store views with `dialect = 'trino'`.
-- **Option C (advanced)**: Implement a DuckDB→Trino SQL transpiler for common patterns. Defer this — scope is large and error-prone.
-- **Recommended**: Start with Option B. Views created by DuckDB with DuckDB-specific syntax (e.g., `STRUCT` literals, `LIST` functions) will not parse in Trino anyway. Expose only compatible views, and when we add `CREATE VIEW` in write mode, store as Trino dialect.
-
-**6. Column aliases**: The `column_aliases` field may contain column name remapping. Map these to `ConnectorViewDefinition.ViewColumn` entries.
-
-**7. Write operations (deferred to write mode)**:
-- `createView` / `dropView` / `renameView` — defer until write support
-- `setViewComment` / `setViewColumnComment` — defer
+- `renameView`
+- `setViewComment`
+- `setViewColumnComment`
+- optional cross-dialect transpilation (research item below)
 
 ### Future: Cross-Dialect View Transpilation (Research Item)
 

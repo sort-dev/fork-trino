@@ -1,8 +1,19 @@
 # Trino Ducklake Connector
 
-Read-only Trino connector for the [Ducklake](https://ducklake.select/) table format.
+Trino connector for the [Ducklake](https://ducklake.select/) table format.
 
 Reads Ducklake metadata from a JDBC catalog database (SQLite or PostgreSQL) and data from Parquet files via Trino's native Parquet reader. Supports data inlined in the metadata catalog (DuckLake's default for small tables).
+
+## Current Capability Snapshot
+
+Supported today:
+- Full read path (current snapshot, time travel, metadata tables, pruning).
+- Metadata writes: `CREATE/DROP VIEW`, `CREATE/DROP SCHEMA`, `CREATE/DROP TABLE`.
+- Table DDL with nested types (`ARRAY`, `ROW`, `MAP`) and `partitioned_by` table property parsing.
+
+Not yet supported:
+- Data writes and row-level mutations: `INSERT`, `CTAS`, `DELETE`, `UPDATE`, `MERGE`.
+- `ALTER TABLE` family.
 
 ## Documentation
 
