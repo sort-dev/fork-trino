@@ -932,7 +932,17 @@ public class JdbcDucklakeCatalog
                     stmt.executeUpdate();
                 }
 
-                // 4. Insert snapshot changes
+                // 4. Insert schema_versions row if schema version changed
+                if (tx.getSchemaVersion() != schemaVersion) {
+                    try (PreparedStatement stmt = conn.prepareStatement(
+                            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) VALUES (?, ?)")) {
+                        stmt.setLong(1, tx.getNewSnapshotId());
+                        stmt.setLong(2, tx.getSchemaVersion());
+                        stmt.executeUpdate();
+                    }
+                }
+
+                // 5. Insert snapshot changes
                 for (String change : tx.getChanges()) {
                     try (PreparedStatement stmt = conn.prepareStatement(
                             "INSERT INTO ducklake_snapshot_changes (snapshot_id, changes_made) VALUES (?, ?)")) {
@@ -983,21 +993,245 @@ public class JdbcDucklakeCatalog
     {
         executeWriteTransaction("drop view " + schemaName + "." + viewName, tx -> {
             long schemaId = tx.resolveSchemaId(schemaName);
-            tx.addChange("dropped_view:" + viewName);
 
+            // Resolve view_id for the change string (spec requires ID, not name)
+            long viewId;
             try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                    "UPDATE ducklake_view SET end_snapshot = ? " +
+                    "SELECT view_id FROM ducklake_view " +
                             "WHERE schema_id = ? AND view_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
-                stmt.setLong(1, tx.getNewSnapshotId());
-                stmt.setLong(2, schemaId);
-                stmt.setString(3, viewName);
+                stmt.setLong(1, schemaId);
+                stmt.setString(2, viewName);
+                stmt.setLong(3, tx.getCurrentSnapshotId());
                 stmt.setLong(4, tx.getCurrentSnapshotId());
-                stmt.setLong(5, tx.getCurrentSnapshotId());
-                int updated = stmt.executeUpdate();
-                if (updated == 0) {
-                    throw new RuntimeException("View not found: " + schemaName + "." + viewName);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (!rs.next()) {
+                        throw new RuntimeException("View not found: " + schemaName + "." + viewName);
+                    }
+                    viewId = rs.getLong("view_id");
                 }
             }
+
+            tx.addChange("dropped_view:" + viewId);
+
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_view SET end_snapshot = ? WHERE view_id = ? AND end_snapshot IS NULL")) {
+                stmt.setLong(1, tx.getNewSnapshotId());
+                stmt.setLong(2, viewId);
+                stmt.executeUpdate();
+            }
+        });
+    }
+
+    // ==================== Schema DDL ====================
+
+    @Override
+    public void createSchema(String schemaName)
+    {
+        executeWriteTransaction("create schema " + schemaName, tx -> {
+            long schemaId = tx.allocateCatalogId();
+            tx.addChange("created_schema:" + schemaName);
+
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "INSERT INTO ducklake_schema (schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative) " +
+                            "VALUES (?, ?, ?, NULL, ?, ?, true)")) {
+                stmt.setLong(1, schemaId);
+                stmt.setString(2, UUID.randomUUID().toString());
+                stmt.setLong(3, tx.getNewSnapshotId());
+                stmt.setString(4, schemaName);
+                stmt.setString(5, schemaName + "/");
+                stmt.executeUpdate();
+            }
+        });
+    }
+
+    @Override
+    public void dropSchema(String schemaName)
+    {
+        executeWriteTransaction("drop schema " + schemaName, tx -> {
+            long schemaId = tx.resolveSchemaId(schemaName);
+
+            if (tx.hasTablesInSchema(schemaId)) {
+                throw new RuntimeException("Cannot drop schema " + schemaName + ": schema is not empty");
+            }
+
+            tx.addChange("dropped_schema:" + schemaId);
+
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_schema SET end_snapshot = ? WHERE schema_id = ? AND end_snapshot IS NULL")) {
+                stmt.setLong(1, tx.getNewSnapshotId());
+                stmt.setLong(2, schemaId);
+                stmt.executeUpdate();
+            }
+        });
+    }
+
+    // ==================== Table DDL ====================
+
+    @Override
+    public void createTable(String schemaName, String tableName,
+            List<TableColumnSpec> columns,
+            Optional<List<PartitionFieldSpec>> partitionSpec)
+    {
+        executeWriteTransaction("create table " + schemaName + "." + tableName, tx -> {
+            long schemaId = tx.resolveSchemaId(schemaName);
+            long tableId = tx.allocateCatalogId();
+
+            // 1. Insert table row
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "INSERT INTO ducklake_table (table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative) " +
+                            "VALUES (?, ?, ?, NULL, ?, ?, ?, true)")) {
+                stmt.setLong(1, tableId);
+                stmt.setString(2, UUID.randomUUID().toString());
+                stmt.setLong(3, tx.getNewSnapshotId());
+                stmt.setLong(4, schemaId);
+                stmt.setString(5, tableName);
+                stmt.setString(6, tableName + "/");
+                stmt.executeUpdate();
+            }
+
+            // 2. Insert column rows (flattening nested types with parent links)
+            Map<String, Long> topLevelColumnIds = new LinkedHashMap<>();
+            long columnOrder = 0;
+            for (TableColumnSpec column : columns) {
+                long columnId = insertColumnTree(tx, tableId, column, columnOrder++, OptionalLong.empty());
+                topLevelColumnIds.put(column.name(), columnId);
+            }
+
+            // 3. Insert table stats (empty table)
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "INSERT INTO ducklake_table_stats (table_id, record_count, next_row_id, file_size_bytes) " +
+                            "VALUES (?, 0, 0, 0)")) {
+                stmt.setLong(1, tableId);
+                stmt.executeUpdate();
+            }
+
+            // 4. Insert partition spec if provided
+            if (partitionSpec.isPresent() && !partitionSpec.get().isEmpty()) {
+                long partitionId = tx.allocateCatalogId();
+
+                try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                        "INSERT INTO ducklake_partition_info (partition_id, table_id, begin_snapshot, end_snapshot) " +
+                                "VALUES (?, ?, ?, NULL)")) {
+                    stmt.setLong(1, partitionId);
+                    stmt.setLong(2, tableId);
+                    stmt.setLong(3, tx.getNewSnapshotId());
+                    stmt.executeUpdate();
+                }
+
+                int keyIndex = 0;
+                for (PartitionFieldSpec field : partitionSpec.get()) {
+                    Long columnId = topLevelColumnIds.get(field.columnName());
+                    if (columnId == null) {
+                        throw new RuntimeException("Partition column not found: " + field.columnName());
+                    }
+                    try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                            "INSERT INTO ducklake_partition_column (partition_id, table_id, partition_key_index, column_id, transform) " +
+                                    "VALUES (?, ?, ?, ?, ?)")) {
+                        stmt.setLong(1, partitionId);
+                        stmt.setLong(2, tableId);
+                        stmt.setLong(3, keyIndex++);
+                        stmt.setLong(4, columnId);
+                        stmt.setString(5, field.transform().name().toLowerCase(java.util.Locale.ENGLISH));
+                        stmt.executeUpdate();
+                    }
+                }
+            }
+
+            tx.incrementSchemaVersion();
+            tx.addChange("created_table:" + tableName);
+        });
+    }
+
+    /**
+     * Recursively inserts a column and its children into ducklake_column.
+     * Returns the column_id of the inserted column.
+     */
+    private long insertColumnTree(DucklakeWriteTransaction tx, long tableId,
+            TableColumnSpec column, long columnOrder, OptionalLong parentColumnId)
+            throws SQLException
+    {
+        long columnId = tx.allocateCatalogId();
+
+        try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                "INSERT INTO ducklake_column (column_id, begin_snapshot, end_snapshot, table_id, column_order, " +
+                        "column_name, column_type, initial_default, default_value, nulls_allowed, parent_column) " +
+                        "VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, NULL, ?, ?)")) {
+            stmt.setLong(1, columnId);
+            stmt.setLong(2, tx.getNewSnapshotId());
+            stmt.setLong(3, tableId);
+            stmt.setLong(4, columnOrder);
+            stmt.setString(5, column.name());
+            stmt.setString(6, column.ducklakeType());
+            stmt.setBoolean(7, column.nullable());
+            if (parentColumnId.isPresent()) {
+                stmt.setLong(8, parentColumnId.getAsLong());
+            }
+            else {
+                stmt.setNull(8, java.sql.Types.BIGINT);
+            }
+            stmt.executeUpdate();
+        }
+
+        // Insert children with their own column_order (0-based within parent)
+        long childOrder = 0;
+        for (TableColumnSpec child : column.children()) {
+            insertColumnTree(tx, tableId, child, childOrder++, OptionalLong.of(columnId));
+        }
+
+        return columnId;
+    }
+
+    @Override
+    public void dropTable(String schemaName, String tableName)
+    {
+        executeWriteTransaction("drop table " + schemaName + "." + tableName, tx -> {
+            long schemaId = tx.resolveSchemaId(schemaName);
+            long tableId = tx.resolveTableId(schemaId, tableName);
+
+            // End-snapshot the table row
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_table SET end_snapshot = ? WHERE table_id = ? AND end_snapshot IS NULL")) {
+                stmt.setLong(1, tx.getNewSnapshotId());
+                stmt.setLong(2, tableId);
+                stmt.executeUpdate();
+            }
+
+            // End-snapshot all active columns
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_column SET end_snapshot = ? WHERE table_id = ? AND end_snapshot IS NULL")) {
+                stmt.setLong(1, tx.getNewSnapshotId());
+                stmt.setLong(2, tableId);
+                stmt.executeUpdate();
+            }
+
+            // End-snapshot all active data files
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_data_file SET end_snapshot = ? WHERE table_id = ? AND end_snapshot IS NULL")) {
+                stmt.setLong(1, tx.getNewSnapshotId());
+                stmt.setLong(2, tableId);
+                stmt.executeUpdate();
+            }
+
+            // End-snapshot all active delete files (via data_file join)
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_delete_file SET end_snapshot = ? " +
+                            "WHERE data_file_id IN (SELECT data_file_id FROM ducklake_data_file WHERE table_id = ?) " +
+                            "AND end_snapshot IS NULL")) {
+                stmt.setLong(1, tx.getNewSnapshotId());
+                stmt.setLong(2, tableId);
+                stmt.executeUpdate();
+            }
+
+            // End-snapshot partition info
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_partition_info SET end_snapshot = ? WHERE table_id = ? AND end_snapshot IS NULL")) {
+                stmt.setLong(1, tx.getNewSnapshotId());
+                stmt.setLong(2, tableId);
+                stmt.executeUpdate();
+            }
+
+            tx.incrementSchemaVersion();
+            tx.addChange("dropped_table:" + tableId);
         });
     }
 
@@ -1078,6 +1312,11 @@ public class JdbcDucklakeCatalog
                     + normalized.substring(normalized.length() - 2);
         }
 
+        // SQLite CURRENT_TIMESTAMP produces no timezone offset (e.g. "2026-04-03T17:45:02");
+        // DuckDB-generated snapshots include timezone. Handle both.
+        if (!normalized.contains("+") && !normalized.contains("Z") && !normalized.matches(".*-[0-9]{2}:[0-9]{2}$")) {
+            return java.time.LocalDateTime.parse(normalized).toInstant(java.time.ZoneOffset.UTC);
+        }
         return java.time.OffsetDateTime.parse(normalized).toInstant();
     }
 

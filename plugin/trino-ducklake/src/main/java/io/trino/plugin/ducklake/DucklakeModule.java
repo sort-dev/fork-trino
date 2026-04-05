@@ -80,5 +80,8 @@ public class DucklakeModule
 
         // Type converter
         binder.bind(DucklakeTypeConverter.class).in(Scopes.SINGLETON);
+
+        // Table properties
+        binder.bind(DucklakeTableProperties.class).in(Scopes.SINGLETON);
     }
 }

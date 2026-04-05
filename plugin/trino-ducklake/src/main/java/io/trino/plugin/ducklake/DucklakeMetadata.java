@@ -28,6 +28,8 @@ import io.trino.plugin.ducklake.catalog.DucklakeSchema;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
 import io.trino.plugin.ducklake.catalog.DucklakeTableStats;
 import io.trino.plugin.ducklake.catalog.DucklakeView;
+import io.trino.plugin.ducklake.catalog.PartitionFieldSpec;
+import io.trino.plugin.ducklake.catalog.TableColumnSpec;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -39,17 +41,22 @@ import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.ViewNotFoundException;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ColumnStatistics;
 import io.trino.spi.statistics.DoubleRange;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.LongTimestampWithTimeZone;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.Type;
@@ -713,6 +720,80 @@ public class DucklakeMetadata
     }
 
     private record MetadataTableName(String baseTableName, DucklakeMetadataTableType metadataTableType) {}
+
+    // ==================== Schema DDL ====================
+
+    @Override
+    public void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties, TrinoPrincipal owner)
+    {
+        catalog.createSchema(schemaName);
+    }
+
+    @Override
+    public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
+    {
+        catalog.dropSchema(schemaName);
+    }
+
+    // ==================== Table DDL ====================
+
+    @Override
+    public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, SaveMode saveMode)
+    {
+        if (saveMode == SaveMode.REPLACE) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
+        }
+
+        SchemaTableName tableName = tableMetadata.getTable();
+
+        // Convert columns to DuckLake column specs
+        List<TableColumnSpec> columnSpecs = tableMetadata.getColumns().stream()
+                .map(column -> toColumnSpec(column.getName(), column.getType(), column.isNullable()))
+                .collect(toImmutableList());
+
+        // Parse partition spec from table properties
+        List<PartitionFieldSpec> partitionFields = DucklakeTableProperties.getPartitionFields(tableMetadata.getProperties());
+        Optional<List<PartitionFieldSpec>> partitionSpec = partitionFields.isEmpty()
+                ? Optional.empty()
+                : Optional.of(partitionFields);
+
+        catalog.createTable(tableName.getSchemaName(), tableName.getTableName(), columnSpecs, partitionSpec);
+    }
+
+    private TableColumnSpec toColumnSpec(String name, Type trinoType, boolean nullable)
+    {
+        String ducklakeType = typeConverter.toDucklakeType(trinoType);
+
+        if (trinoType instanceof ArrayType arrayType) {
+            List<TableColumnSpec> children = ImmutableList.of(
+                    toColumnSpec("element", arrayType.getElementType(), true));
+            return new TableColumnSpec(name, ducklakeType, nullable, children);
+        }
+        if (trinoType instanceof RowType rowType) {
+            List<TableColumnSpec> children = rowType.getFields().stream()
+                    .map(field -> toColumnSpec(
+                            field.getName().orElseThrow(() -> new TrinoException(NOT_SUPPORTED, "Anonymous row fields not supported")),
+                            field.getType(),
+                            true))
+                    .collect(toImmutableList());
+            return new TableColumnSpec(name, ducklakeType, nullable, children);
+        }
+        if (trinoType instanceof MapType mapType) {
+            List<TableColumnSpec> children = ImmutableList.of(
+                    toColumnSpec("key", mapType.getKeyType(), false),
+                    toColumnSpec("value", mapType.getValueType(), true));
+            return new TableColumnSpec(name, ducklakeType, nullable, children);
+        }
+
+        return TableColumnSpec.leaf(name, ducklakeType, nullable);
+    }
+
+    @Override
+    public void dropTable(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
+        catalog.dropTable(handle.schemaName(), handle.tableName());
+    }
 
     // ==================== View operations ====================
 

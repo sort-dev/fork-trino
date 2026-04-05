@@ -23,6 +23,7 @@ import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.SmallintType;
@@ -235,7 +236,17 @@ public class DucklakeTypeConverter
             return "uuid";
         }
 
-        // TODO: Handle nested types (ArrayType, RowType, MapType)
+        // Nested types: DuckLake stores these as parent column type strings;
+        // child columns are separate rows linked via parent_column.
+        if (trinoType instanceof ArrayType) {
+            return "list";
+        }
+        if (trinoType instanceof RowType) {
+            return "struct";
+        }
+        if (trinoType instanceof MapType) {
+            return "map";
+        }
 
         throw new TrinoException(NOT_SUPPORTED, format("Unsupported Trino type: %s", trinoType));
     }

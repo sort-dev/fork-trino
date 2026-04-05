@@ -1403,7 +1403,7 @@ public class TestDucklakeIntegration
         assertThat(result.getMaterializedRows().get(0).getField(0)).isEqualTo(1L);
     }
 
-    // ==================== Write operations should fail ====================
+    // ==================== Write operations not yet supported ====================
 
     @Test
     public void testInsertNotSupported()
@@ -1421,20 +1421,21 @@ public class TestDucklakeIntegration
                 ".*not supported.*|.*This connector does not support.*");
     }
 
-    @Test
-    public void testCreateTableNotSupported()
-    {
-        assertQueryFails(
-                "CREATE TABLE test_schema.new_table (id INTEGER)",
-                ".*not supported.*|.*This connector does not support.*");
-    }
+    // ==================== DDL operations (now supported) ====================
 
     @Test
-    public void testDropTableNotSupported()
+    public void testCreateAndDropTable()
     {
-        assertQueryFails(
-                "DROP TABLE simple_table",
-                ".*not supported.*|.*This connector does not support.*");
+        computeActual("CREATE TABLE test_schema.ddl_test_table (id INTEGER, name VARCHAR)");
+        try {
+            List<String> tables = computeActual("SHOW TABLES FROM test_schema").getMaterializedRows().stream()
+                    .map(row -> row.getField(0).toString())
+                    .toList();
+            assertThat(tables).contains("ddl_test_table");
+        }
+        finally {
+            computeActual("DROP TABLE test_schema.ddl_test_table");
+        }
     }
 
     // ==================== Inlined Data Tests ====================

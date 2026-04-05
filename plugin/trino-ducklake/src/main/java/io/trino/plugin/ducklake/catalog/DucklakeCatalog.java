@@ -130,6 +130,36 @@ public interface DucklakeCatalog
      */
     Optional<String> getDataPath();
 
+    // ==================== Schema DDL ====================
+
+    /**
+     * Create a new schema. Creates a new snapshot atomically.
+     */
+    void createSchema(String schemaName);
+
+    /**
+     * Drop a schema. Fails if the schema contains tables.
+     * Creates a new snapshot atomically.
+     */
+    void dropSchema(String schemaName);
+
+    // ==================== Table DDL ====================
+
+    /**
+     * Create a new empty table with columns and optional partition spec.
+     * Creates a new snapshot atomically.
+     */
+    void createTable(String schemaName, String tableName,
+            List<TableColumnSpec> columns,
+            Optional<List<PartitionFieldSpec>> partitionSpec);
+
+    /**
+     * Drop a table. Sets end_snapshot on the table and all its columns,
+     * data files, delete files, and partition info.
+     * Creates a new snapshot atomically.
+     */
+    void dropTable(String schemaName, String tableName);
+
     // ==================== View operations ====================
 
     /**
@@ -145,14 +175,12 @@ public interface DucklakeCatalog
     /**
      * Create a new view in the catalog.
      * Creates a new snapshot and inserts the view row atomically.
-     * Lightweight write operation — will be refactored into M0 transaction abstraction later.
      */
     void createView(String schemaName, String viewName, String sql, String dialect, String columnAliases);
 
     /**
      * Drop an existing view from the catalog.
      * Creates a new snapshot and sets end_snapshot on the view row atomically.
-     * Lightweight write operation — will be refactored into M0 transaction abstraction later.
      */
     void dropView(String schemaName, String viewName);
 

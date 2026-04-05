@@ -44,6 +44,7 @@ public class DucklakeConnector
     private final ConnectorSplitManager splitManager;
     private final ConnectorPageSourceProviderFactory pageSourceProviderFactory;
     private final List<PropertyMetadata<?>> sessionProperties;
+    private final List<PropertyMetadata<?>> tableProperties;
 
     @Inject
     public DucklakeConnector(
@@ -51,13 +52,15 @@ public class DucklakeConnector
             DucklakeTransactionManager transactionManager,
             ConnectorSplitManager splitManager,
             ConnectorPageSourceProviderFactory pageSourceProviderFactory,
-            DucklakeSessionProperties ducklakeSessionProperties)
+            DucklakeSessionProperties ducklakeSessionProperties,
+            DucklakeTableProperties ducklakeTableProperties)
     {
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.pageSourceProviderFactory = requireNonNull(pageSourceProviderFactory, "pageSourceProviderFactory is null");
         this.sessionProperties = ImmutableList.copyOf(requireNonNull(ducklakeSessionProperties, "ducklakeSessionProperties is null").getSessionProperties());
+        this.tableProperties = ImmutableList.copyOf(requireNonNull(ducklakeTableProperties, "ducklakeTableProperties is null").getTableProperties());
     }
 
     @Override
@@ -83,6 +86,12 @@ public class DucklakeConnector
     public List<PropertyMetadata<?>> getSessionProperties()
     {
         return sessionProperties;
+    }
+
+    @Override
+    public List<PropertyMetadata<?>> getTableProperties()
+    {
+        return tableProperties;
     }
 
     @Override

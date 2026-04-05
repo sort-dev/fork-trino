@@ -32,7 +32,7 @@ class DucklakeWriteTransaction
     private final Connection connection;
     private final long currentSnapshotId;
     private final long newSnapshotId;
-    private final long schemaVersion;
+    private long schemaVersion;
     private long nextCatalogId;
     private long nextFileId;
     private final List<String> changes = new ArrayList<>();
@@ -108,6 +108,55 @@ class DucklakeWriteTransaction
                 return rs.getLong("schema_id");
             }
         }
+    }
+
+    /**
+     * Resolves a table name to its table_id within a schema at the current snapshot.
+     */
+    public long resolveTableId(long schemaId, String tableName)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = connection.prepareStatement(
+                "SELECT table_id FROM ducklake_table " +
+                        "WHERE schema_id = ? AND table_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+            stmt.setLong(1, schemaId);
+            stmt.setString(2, tableName);
+            stmt.setLong(3, currentSnapshotId);
+            stmt.setLong(4, currentSnapshotId);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    throw new RuntimeException("Table not found: " + tableName);
+                }
+                return rs.getLong("table_id");
+            }
+        }
+    }
+
+    /**
+     * Checks whether a schema has any active tables at the current snapshot.
+     */
+    public boolean hasTablesInSchema(long schemaId)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = connection.prepareStatement(
+                "SELECT 1 FROM ducklake_table " +
+                        "WHERE schema_id = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL) LIMIT 1")) {
+            stmt.setLong(1, schemaId);
+            stmt.setLong(2, currentSnapshotId);
+            stmt.setLong(3, currentSnapshotId);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    /**
+     * Increments the schema version. Called for DDL operations that change
+     * the table/column structure (create table, drop table, alter table, etc.).
+     */
+    public void incrementSchemaVersion()
+    {
+        schemaVersion++;
     }
 
     /**
