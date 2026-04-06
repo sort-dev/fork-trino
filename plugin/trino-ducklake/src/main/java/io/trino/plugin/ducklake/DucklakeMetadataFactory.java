@@ -14,32 +14,36 @@
 package io.trino.plugin.ducklake;
 
 import com.google.inject.Inject;
+import io.airlift.json.JsonCodec;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * Factory for creating DucklakeMetadata instances.
- */
 public class DucklakeMetadataFactory
 {
     private final DucklakeCatalog catalog;
     private final DucklakeTypeConverter typeConverter;
     private final DucklakeSnapshotResolver snapshotResolver;
+    private final JsonCodec<DucklakeWriteFragment> fragmentCodec;
+    private final DucklakePathResolver pathResolver;
 
     @Inject
     public DucklakeMetadataFactory(
             DucklakeCatalog catalog,
             DucklakeTypeConverter typeConverter,
-            DucklakeSnapshotResolver snapshotResolver)
+            DucklakeSnapshotResolver snapshotResolver,
+            JsonCodec<DucklakeWriteFragment> fragmentCodec,
+            DucklakePathResolver pathResolver)
     {
         this.catalog = requireNonNull(catalog, "catalog is null");
         this.typeConverter = requireNonNull(typeConverter, "typeConverter is null");
         this.snapshotResolver = requireNonNull(snapshotResolver, "snapshotResolver is null");
+        this.fragmentCodec = requireNonNull(fragmentCodec, "fragmentCodec is null");
+        this.pathResolver = requireNonNull(pathResolver, "pathResolver is null");
     }
 
     public DucklakeMetadata create()
     {
-        return new DucklakeMetadata(catalog, typeConverter, snapshotResolver);
+        return new DucklakeMetadata(catalog, typeConverter, snapshotResolver, fragmentCodec, pathResolver);
     }
 }

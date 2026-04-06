@@ -16,21 +16,22 @@ package io.trino.plugin.ducklake;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Scopes;
+import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSinkProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSourceProviderFactory;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitManager;
 import io.trino.plugin.base.classloader.ForClassLoaderSafe;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
+import io.trino.plugin.hive.parquet.ParquetWriterConfig;
+import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProviderFactory;
 import io.trino.spi.connector.ConnectorSplitManager;
 
 import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
-/**
- * Guice module for Ducklake connector bindings.
- */
 public class DucklakeModule
         implements Module
 {
@@ -40,6 +41,7 @@ public class DucklakeModule
         // Configuration
         configBinder(binder).bindConfig(DucklakeConfig.class);
         configBinder(binder).bindConfig(ParquetReaderConfig.class);
+        configBinder(binder).bindConfig(ParquetWriterConfig.class);
 
         // Core connector components
         binder.bind(DucklakeConnector.class).in(Scopes.SINGLETON);
@@ -53,6 +55,9 @@ public class DucklakeModule
 
         // File system factory
         binder.bind(DucklakeFileSystemFactory.class).to(DefaultDucklakeFileSystemFactory.class).in(Scopes.SINGLETON);
+
+        // Path resolver
+        binder.bind(DucklakePathResolver.class).in(Scopes.SINGLETON);
 
         // Split manager
         binder.bind(ConnectorSplitManager.class)
@@ -73,8 +78,19 @@ public class DucklakeModule
                 .to(ClassLoaderSafeConnectorPageSourceProviderFactory.class)
                 .in(Scopes.SINGLETON);
 
+        // Page sink provider
+        binder.bind(ConnectorPageSinkProvider.class)
+                .annotatedWith(ForClassLoaderSafe.class)
+                .to(DucklakePageSinkProvider.class)
+                .in(Scopes.SINGLETON);
+        binder.bind(ConnectorPageSinkProvider.class)
+                .to(ClassLoaderSafeConnectorPageSinkProvider.class)
+                .in(Scopes.SINGLETON);
+
+        // Write fragment codec
+        jsonCodecBinder(binder).bindJsonCodec(DucklakeWriteFragment.class);
+
         // Parquet reader configuration and stats
-        // Note: ParquetReaderOptions is created in the factory from ParquetReaderConfig
         binder.bind(FileFormatDataSourceStats.class).in(Scopes.SINGLETON);
         newExporter(binder).export(FileFormatDataSourceStats.class).withGeneratedName();
 

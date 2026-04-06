@@ -19,6 +19,7 @@ import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorMetadata;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorMetadata;
+import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProviderFactory;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
@@ -43,6 +44,7 @@ public class DucklakeConnector
     private final DucklakeTransactionManager transactionManager;
     private final ConnectorSplitManager splitManager;
     private final ConnectorPageSourceProviderFactory pageSourceProviderFactory;
+    private final ConnectorPageSinkProvider pageSinkProvider;
     private final List<PropertyMetadata<?>> sessionProperties;
     private final List<PropertyMetadata<?>> tableProperties;
 
@@ -52,6 +54,7 @@ public class DucklakeConnector
             DucklakeTransactionManager transactionManager,
             ConnectorSplitManager splitManager,
             ConnectorPageSourceProviderFactory pageSourceProviderFactory,
+            ConnectorPageSinkProvider pageSinkProvider,
             DucklakeSessionProperties ducklakeSessionProperties,
             DucklakeTableProperties ducklakeTableProperties)
     {
@@ -59,6 +62,7 @@ public class DucklakeConnector
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.pageSourceProviderFactory = requireNonNull(pageSourceProviderFactory, "pageSourceProviderFactory is null");
+        this.pageSinkProvider = requireNonNull(pageSinkProvider, "pageSinkProvider is null");
         this.sessionProperties = ImmutableList.copyOf(requireNonNull(ducklakeSessionProperties, "ducklakeSessionProperties is null").getSessionProperties());
         this.tableProperties = ImmutableList.copyOf(requireNonNull(ducklakeTableProperties, "ducklakeTableProperties is null").getTableProperties());
     }
@@ -80,6 +84,12 @@ public class DucklakeConnector
     public ConnectorPageSourceProviderFactory getPageSourceProviderFactory()
     {
         return pageSourceProviderFactory;
+    }
+
+    @Override
+    public ConnectorPageSinkProvider getPageSinkProvider()
+    {
+        return pageSinkProvider;
     }
 
     @Override

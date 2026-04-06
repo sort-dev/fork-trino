@@ -76,7 +76,7 @@ public class TestDucklakeDeleteFileHandling
 
         DucklakeCatalog catalog = new SqliteDucklakeCatalog(config);
         try {
-            DucklakeSplitManager splitManager = new DucklakeSplitManager(catalog, config);
+            DucklakeSplitManager splitManager = new DucklakeSplitManager(catalog, config, new DucklakePathResolver(catalog, config));
             DucklakePageSourceProvider pageSourceProvider = new DucklakePageSourceProvider(
                     new LocalFileSystemFactory(Path.of("/")),
                     new FileFormatDataSourceStats(),

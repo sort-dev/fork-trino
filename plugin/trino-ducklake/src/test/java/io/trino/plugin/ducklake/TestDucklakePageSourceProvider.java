@@ -65,7 +65,7 @@ public class TestDucklakePageSourceProvider
         DucklakeConfig config = DucklakeTestCatalogEnvironment.createDucklakeConfig();
 
         catalog = new JdbcDucklakeCatalog(config);
-        splitManager = new DucklakeSplitManager(catalog, config);
+        splitManager = new DucklakeSplitManager(catalog, config, new DucklakePathResolver(catalog, config));
         pageSourceProvider = new DucklakePageSourceProvider(
                 new LocalFileSystemFactory(Path.of("/")),
                 new FileFormatDataSourceStats(),

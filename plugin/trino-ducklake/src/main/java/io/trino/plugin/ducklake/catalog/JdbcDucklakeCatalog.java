@@ -18,6 +18,8 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.airlift.log.Logger;
 import io.trino.plugin.ducklake.DucklakeConfig;
+import io.trino.plugin.ducklake.DucklakeFileColumnStats;
+import io.trino.plugin.ducklake.DucklakeWriteFragment;
 import io.trino.spi.connector.SchemaTableName;
 
 import javax.sql.DataSource;
@@ -1232,6 +1234,103 @@ public class JdbcDucklakeCatalog
 
             tx.incrementSchemaVersion();
             tx.addChange("dropped_table:" + tableId);
+        });
+    }
+
+    @Override
+    public void commitInsert(long tableId, String schemaName, String tableName, List<DucklakeWriteFragment> fragments)
+    {
+        if (fragments.isEmpty()) {
+            return;
+        }
+
+        executeWriteTransaction("insert into " + schemaName + "." + tableName, tx -> {
+            // Read current table stats
+            long currentNextRowId;
+            long currentRecordCount;
+            long currentFileSizeBytes;
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "SELECT record_count, next_row_id, file_size_bytes FROM ducklake_table_stats WHERE table_id = ?")) {
+                stmt.setLong(1, tableId);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (!rs.next()) {
+                        throw new RuntimeException("No table stats found for table_id=" + tableId);
+                    }
+                    currentRecordCount = rs.getLong("record_count");
+                    currentNextRowId = rs.getLong("next_row_id");
+                    currentFileSizeBytes = rs.getLong("file_size_bytes");
+                }
+            }
+
+            long runningRowId = currentNextRowId;
+            long totalRecords = 0;
+            long totalFileSize = 0;
+
+            for (DucklakeWriteFragment fragment : fragments) {
+                long dataFileId = tx.allocateFileId();
+
+                // Insert ducklake_data_file
+                try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                        "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, " +
+                                "file_order, path, path_is_relative, file_format, record_count, file_size_bytes, " +
+                                "footer_size, row_id_start) " +
+                                "VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, 0, ?)")) {
+                    stmt.setLong(1, dataFileId);
+                    stmt.setLong(2, tableId);
+                    stmt.setLong(3, tx.getNewSnapshotId());
+                    stmt.setLong(4, dataFileId); // file_order = data_file_id for uniqueness
+                    stmt.setString(5, fragment.path());
+                    stmt.setLong(6, fragment.recordCount());
+                    stmt.setLong(7, fragment.fileSizeBytes());
+                    stmt.setLong(8, runningRowId);
+                    stmt.executeUpdate();
+                }
+
+                // Insert ducklake_file_column_stats per column
+                for (DucklakeFileColumnStats colStats : fragment.columnStats()) {
+                    try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                            "INSERT INTO ducklake_file_column_stats (data_file_id, table_id, column_id, " +
+                                    "column_size_bytes, value_count, null_count, min_value, max_value, contains_nan) " +
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                        stmt.setLong(1, dataFileId);
+                        stmt.setLong(2, tableId);
+                        stmt.setLong(3, colStats.columnId());
+                        stmt.setLong(4, colStats.columnSizeBytes());
+                        stmt.setLong(5, colStats.valueCount());
+                        stmt.setLong(6, colStats.nullCount());
+                        if (colStats.minValue().isPresent()) {
+                            stmt.setString(7, colStats.minValue().get());
+                        }
+                        else {
+                            stmt.setNull(7, java.sql.Types.VARCHAR);
+                        }
+                        if (colStats.maxValue().isPresent()) {
+                            stmt.setString(8, colStats.maxValue().get());
+                        }
+                        else {
+                            stmt.setNull(8, java.sql.Types.VARCHAR);
+                        }
+                        stmt.setBoolean(9, colStats.containsNan());
+                        stmt.executeUpdate();
+                    }
+                }
+
+                runningRowId += fragment.recordCount();
+                totalRecords += fragment.recordCount();
+                totalFileSize += fragment.fileSizeBytes();
+            }
+
+            // Update ducklake_table_stats
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_table_stats SET record_count = ?, next_row_id = ?, file_size_bytes = ? WHERE table_id = ?")) {
+                stmt.setLong(1, currentRecordCount + totalRecords);
+                stmt.setLong(2, currentNextRowId + totalRecords);
+                stmt.setLong(3, currentFileSizeBytes + totalFileSize);
+                stmt.setLong(4, tableId);
+                stmt.executeUpdate();
+            }
+
+            tx.addChange("inserted_into_table:" + tableId);
         });
     }
 

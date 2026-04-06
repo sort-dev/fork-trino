@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.airlift.log.Logger;
+import io.airlift.slice.Slice;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeColumnStats;
@@ -33,14 +34,19 @@ import io.trino.plugin.ducklake.catalog.TableColumnSpec;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
+import io.trino.spi.connector.ConnectorOutputMetadata;
+import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
+import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
@@ -49,6 +55,7 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ColumnStatistics;
+import io.trino.spi.statistics.ComputedStatistics;
 import io.trino.spi.statistics.DoubleRange;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
@@ -65,6 +72,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -107,17 +115,31 @@ public class DucklakeMetadata
     private final DucklakeCatalog catalog;
     private final DucklakeTypeConverter typeConverter;
     private final DucklakeSnapshotResolver snapshotResolver;
+    private final JsonCodec<DucklakeWriteFragment> fragmentCodec;
+    private final DucklakePathResolver pathResolver;
 
     public DucklakeMetadata(DucklakeCatalog catalog, DucklakeTypeConverter typeConverter)
     {
-        this(catalog, typeConverter, new DucklakeSnapshotResolver(catalog, OptionalLong.empty(), Optional.empty()));
+        this(catalog, typeConverter, new DucklakeSnapshotResolver(catalog, OptionalLong.empty(), Optional.empty()), null, null);
     }
 
     public DucklakeMetadata(DucklakeCatalog catalog, DucklakeTypeConverter typeConverter, DucklakeSnapshotResolver snapshotResolver)
     {
+        this(catalog, typeConverter, snapshotResolver, null, null);
+    }
+
+    public DucklakeMetadata(
+            DucklakeCatalog catalog,
+            DucklakeTypeConverter typeConverter,
+            DucklakeSnapshotResolver snapshotResolver,
+            JsonCodec<DucklakeWriteFragment> fragmentCodec,
+            DucklakePathResolver pathResolver)
+    {
         this.catalog = requireNonNull(catalog, "catalog is null");
         this.typeConverter = requireNonNull(typeConverter, "typeConverter is null");
         this.snapshotResolver = requireNonNull(snapshotResolver, "snapshotResolver is null");
+        this.fragmentCodec = fragmentCodec;
+        this.pathResolver = pathResolver;
     }
 
     @Override
@@ -793,6 +815,140 @@ public class DucklakeMetadata
     {
         DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
         catalog.dropTable(handle.schemaName(), handle.tableName());
+    }
+
+    // ==================== INSERT ====================
+
+    @Override
+    public ConnectorInsertTableHandle beginInsert(
+            ConnectorSession session,
+            ConnectorTableHandle tableHandle,
+            List<ColumnHandle> columns,
+            RetryMode retryMode)
+    {
+        DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
+
+        List<DucklakeColumnHandle> ducklakeColumns = columns.stream()
+                .map(DucklakeColumnHandle.class::cast)
+                .collect(toImmutableList());
+
+        String tableDataPath = resolveTableDataPath(handle.schemaName(), handle.tableName(), handle.snapshotId());
+
+        return new DucklakeWritableTableHandle(
+                handle.schemaName(),
+                handle.tableName(),
+                handle.tableId(),
+                ducklakeColumns,
+                tableDataPath);
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishInsert(
+            ConnectorSession session,
+            ConnectorInsertTableHandle insertHandle,
+            List<ConnectorTableHandle> sourceTableHandles,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
+    {
+        DucklakeWritableTableHandle handle = (DucklakeWritableTableHandle) insertHandle;
+        List<DucklakeWriteFragment> writeFragments = deserializeFragments(fragments);
+
+        if (!writeFragments.isEmpty()) {
+            catalog.commitInsert(handle.tableId(), handle.schemaName(), handle.tableName(), writeFragments);
+        }
+
+        return Optional.empty();
+    }
+
+    // ==================== CTAS ====================
+
+    @Override
+    public ConnectorOutputTableHandle beginCreateTable(
+            ConnectorSession session,
+            ConnectorTableMetadata tableMetadata,
+            Optional<ConnectorTableLayout> layout,
+            RetryMode retryMode,
+            boolean replace)
+    {
+        if (replace) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support replacing tables");
+        }
+
+        SchemaTableName tableName = tableMetadata.getTable();
+
+        // Create the table structure (DDL snapshot)
+        List<TableColumnSpec> columnSpecs = tableMetadata.getColumns().stream()
+                .map(column -> toColumnSpec(column.getName(), column.getType(), column.isNullable()))
+                .collect(toImmutableList());
+
+        List<PartitionFieldSpec> partitionFields = DucklakeTableProperties.getPartitionFields(tableMetadata.getProperties());
+        Optional<List<PartitionFieldSpec>> partitionSpec = partitionFields.isEmpty()
+                ? Optional.empty()
+                : Optional.of(partitionFields);
+
+        catalog.createTable(tableName.getSchemaName(), tableName.getTableName(), columnSpecs, partitionSpec);
+
+        // Resolve the newly created table to get its ID and build a writable handle
+        long snapshotId = catalog.getCurrentSnapshotId();
+        Optional<DucklakeTable> table = catalog.getTable(tableName, snapshotId);
+        if (table.isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "Table was not created: " + tableName);
+        }
+
+        List<DucklakeColumn> catalogColumns = catalog.getTableColumns(table.get().tableId(), snapshotId);
+        List<DucklakeColumnHandle> columnHandles = catalogColumns.stream()
+                .filter(col -> col.parentColumn().isEmpty())
+                .map(col -> new DucklakeColumnHandle(
+                        col.columnId(),
+                        col.columnName(),
+                        typeConverter.toTrinoType(col.columnType()),
+                        col.nullsAllowed()))
+                .collect(toImmutableList());
+
+        String tableDataPath = resolveTableDataPath(tableName.getSchemaName(), tableName.getTableName(), snapshotId);
+
+        return new DucklakeWritableTableHandle(
+                tableName.getSchemaName(),
+                tableName.getTableName(),
+                table.get().tableId(),
+                columnHandles,
+                tableDataPath);
+    }
+
+    @Override
+    public Optional<ConnectorOutputMetadata> finishCreateTable(
+            ConnectorSession session,
+            ConnectorOutputTableHandle tableHandle,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
+    {
+        DucklakeWritableTableHandle handle = (DucklakeWritableTableHandle) tableHandle;
+        List<DucklakeWriteFragment> writeFragments = deserializeFragments(fragments);
+
+        if (!writeFragments.isEmpty()) {
+            catalog.commitInsert(handle.tableId(), handle.schemaName(), handle.tableName(), writeFragments);
+        }
+
+        return Optional.empty();
+    }
+
+    private List<DucklakeWriteFragment> deserializeFragments(Collection<Slice> fragments)
+    {
+        return fragments.stream()
+                .map(fragment -> fragmentCodec.fromJson(fragment.getBytes()))
+                .collect(toImmutableList());
+    }
+
+    private String resolveTableDataPath(String schemaName, String tableName, long snapshotId)
+    {
+        Optional<DucklakeSchema> schema = catalog.getSchema(schemaName, snapshotId);
+        Optional<DucklakeTable> table = catalog.getTable(new SchemaTableName(schemaName, tableName), snapshotId);
+
+        if (schema.isEmpty() || table.isEmpty()) {
+            throw new TrinoException(NOT_SUPPORTED, "Cannot resolve data path for " + schemaName + "." + tableName);
+        }
+
+        return pathResolver.resolveTableDataPath(schema.get(), table.get());
     }
 
     // ==================== View operations ====================

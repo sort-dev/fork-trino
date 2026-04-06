@@ -1403,15 +1403,7 @@ public class TestDucklakeIntegration
         assertThat(result.getMaterializedRows().get(0).getField(0)).isEqualTo(1L);
     }
 
-    // ==================== Write operations not yet supported ====================
-
-    @Test
-    public void testInsertNotSupported()
-    {
-        assertQueryFails(
-                "INSERT INTO simple_table VALUES (99, 'test', 1.0, true, DATE '2024-01-01')",
-                ".*not supported.*|.*This connector does not support.*");
-    }
+    // ==================== Write operations (not yet supported) ====================
 
     @Test
     public void testDeleteNotSupported()

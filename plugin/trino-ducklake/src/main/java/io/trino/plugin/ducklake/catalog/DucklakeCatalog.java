@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.ducklake.catalog;
 
+import io.trino.plugin.ducklake.DucklakeWriteFragment;
 import io.trino.spi.connector.SchemaTableName;
 
 import java.time.Instant;
@@ -159,6 +160,13 @@ public interface DucklakeCatalog
      * Creates a new snapshot atomically.
      */
     void dropTable(String schemaName, String tableName);
+
+    /**
+     * Commit inserted data files to a table.
+     * Creates a new snapshot with data file rows, file column stats,
+     * and updated table stats.
+     */
+    void commitInsert(long tableId, String schemaName, String tableName, List<DucklakeWriteFragment> fragments);
 
     // ==================== View operations ====================
 

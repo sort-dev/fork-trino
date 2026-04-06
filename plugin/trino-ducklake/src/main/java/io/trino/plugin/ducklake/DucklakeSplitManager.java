@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.airlift.slice.Slices;
-import io.trino.filesystem.Location;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
@@ -74,15 +73,15 @@ public class DucklakeSplitManager
     private static final Logger log = Logger.get(DucklakeSplitManager.class);
 
     private final DucklakeCatalog catalog;
-    private final DucklakeConfig config;
+    private final DucklakePathResolver pathResolver;
     private final DucklakeTemporalPartitionEncoding temporalPartitionEncoding;
     private final boolean temporalPartitionEncodingReadLeniency;
 
     @Inject
-    public DucklakeSplitManager(DucklakeCatalog catalog, DucklakeConfig config)
+    public DucklakeSplitManager(DucklakeCatalog catalog, DucklakeConfig config, DucklakePathResolver pathResolver)
     {
         this.catalog = requireNonNull(catalog, "catalog is null");
-        this.config = requireNonNull(config, "config is null");
+        this.pathResolver = requireNonNull(pathResolver, "pathResolver is null");
         this.temporalPartitionEncoding = config.getTemporalPartitionEncoding();
         this.temporalPartitionEncodingReadLeniency = config.isTemporalPartitionEncodingReadLeniency();
     }
@@ -130,7 +129,7 @@ public class DucklakeSplitManager
                     .orElseThrow(() -> new IllegalStateException("Table metadata missing for table ID: " + tableHandle.tableId()));
             DucklakeSchema schemaMetadata = catalog.getSchema(tableHandle.schemaName(), tableHandle.snapshotId())
                     .orElseThrow(() -> new IllegalStateException("Schema metadata missing for schema: " + tableHandle.schemaName()));
-            String tableDataPath = resolveTableDataPath(schemaMetadata, tableMetadata);
+            String tableDataPath = pathResolver.resolveTableDataPath(schemaMetadata, tableMetadata);
 
             TupleDomain<DucklakeColumnHandle> fileStatisticsDomain = buildFileStatisticsDomain(constraint)
                     .intersect(tableHandle.unenforcedPredicate());
@@ -483,11 +482,11 @@ public class DucklakeSplitManager
     private DucklakeSplit createSplit(DucklakeDataFile dataFile, String tableDataPath, TupleDomain<DucklakeColumnHandle> fileStatisticsDomain)
     {
         // Resolve the full path for the data file
-        String dataFilePath = resolveFilePath(dataFile.path(), dataFile.pathIsRelative(), tableDataPath);
+        String dataFilePath = pathResolver.resolveFilePath(dataFile.path(), dataFile.pathIsRelative(), tableDataPath);
 
         // Resolve delete file path if present
         Optional<String> deleteFilePath = dataFile.deleteFilePath()
-                .map(path -> resolveFilePath(path, dataFile.deleteFilePathIsRelative().orElse(false), tableDataPath));
+                .map(path -> pathResolver.resolveFilePath(path, dataFile.deleteFilePathIsRelative().orElse(false), tableDataPath));
 
         return new DucklakeSplit(
                 dataFilePath,
@@ -497,40 +496,6 @@ public class DucklakeSplitManager
                 dataFile.fileSizeBytes(),
                 dataFile.fileFormat(),
                 fileStatisticsDomain);
-    }
-
-    private String resolveFilePath(String path, boolean isRelative, String tableDataPath)
-    {
-        if (!isRelative) {
-            return path;
-        }
-
-        return Location.of(tableDataPath).appendPath(path).toString();
-    }
-
-    private String resolveTableDataPath(DucklakeSchema schema, DucklakeTable table)
-    {
-        Optional<String> catalogDataPath = catalog.getDataPath();
-        String rootDataPath = catalogDataPath.orElseGet(config::getDataPath);
-
-        if (rootDataPath == null) {
-            throw new IllegalStateException("No data path configured for relative file paths");
-        }
-
-        String schemaDataPath = resolveScopedPath(schema.path(), schema.pathIsRelative(), rootDataPath);
-        return resolveScopedPath(table.path(), table.pathIsRelative(), schemaDataPath);
-    }
-
-    private String resolveScopedPath(Optional<String> path, Optional<Boolean> isRelative, String parentPath)
-    {
-        if (path.isEmpty() || path.get().isBlank()) {
-            return parentPath;
-        }
-
-        if (isRelative.orElse(false)) {
-            return Location.of(parentPath).appendPath(path.get()).toString();
-        }
-        return path.get();
     }
 
     private record PredicateBounds(Object minValue, Object maxValue) {}
