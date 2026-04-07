@@ -65,7 +65,12 @@ public class TestDucklakeCrossEngineCompatibility
     private Connection createDuckdbConnection()
             throws Exception
     {
-        flushSqliteCatalog();
+        // A separate SQLite JDBC connection must be held open while DuckDB attaches
+        // the catalog. Without this, DuckDB's SQLite extension may not see data committed
+        // by Trino's HikariCP connection pool (SQLite rollback journal visibility quirk).
+        Connection syncConn = DriverManager.getConnection("jdbc:sqlite:" + catalogPath.toAbsolutePath());
+        syncConn.createStatement().executeQuery("SELECT max(snapshot_id) FROM ducklake_snapshot").close();
+
         Connection conn = DriverManager.getConnection("jdbc:duckdb:");
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("INSTALL ducklake");
@@ -73,6 +78,8 @@ public class TestDucklakeCrossEngineCompatibility
             stmt.execute("ATTACH 'sqlite:" + catalogPath.toAbsolutePath() + "' AS ducklake_db " +
                     "(TYPE DUCKLAKE, DATA_PATH '" + dataDir.toAbsolutePath() + "')");
         }
+
+        syncConn.close();
         return conn;
     }
 
@@ -102,7 +109,7 @@ public class TestDucklakeCrossEngineCompatibility
                 assertThat(rawCount).as("DuckDB direct Parquet read").isEqualTo(3);
             }
 
-            flushSqliteCatalog();
+            syncCatalogForCrossEngineRead();
 
             // Verify DuckDB can read it via DuckLake catalog (fresh connection)
             try (Connection conn = createDuckdbConnection()) {
@@ -374,7 +381,12 @@ public class TestDucklakeCrossEngineCompatibility
      * because SQLite in rollback journal mode can leave pending changes invisible
      * to other processes/connections until the journal is fully checkpointed.
      */
-    private void flushSqliteCatalog()
+    /**
+     * Ensures DuckDB can see the latest catalog state.
+     * Opens a separate SQLite JDBC connection and reads, which appears to
+     * synchronize the SQLite file state for cross-process readers.
+     */
+    private void syncCatalogForCrossEngineRead()
     {
         try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + catalogPath.toAbsolutePath());
                 Statement stmt = conn.createStatement();
@@ -382,7 +394,7 @@ public class TestDucklakeCrossEngineCompatibility
             rs.next();
         }
         catch (Exception e) {
-            throw new RuntimeException("Failed to flush SQLite catalog", e);
+            throw new RuntimeException("Failed to sync SQLite catalog", e);
         }
     }
 

@@ -53,11 +53,14 @@ public class JdbcDucklakeCatalog
 
     private final DataSource dataSource;
     private final HikariDataSource hikariDataSource;
+    private final boolean isPostgresql;
 
     @Inject
     public JdbcDucklakeCatalog(DucklakeConfig config)
     {
         requireNonNull(config, "config is null");
+
+        this.isPostgresql = config.getCatalogDatabaseUrl().startsWith("jdbc:postgresql:");
 
         HikariConfig hikariConfig = new HikariConfig();
         hikariConfig.setJdbcUrl(config.getCatalogDatabaseUrl());
@@ -984,7 +987,7 @@ public class JdbcDucklakeCatalog
                     "INSERT INTO ducklake_view (view_id, view_uuid, begin_snapshot, end_snapshot, schema_id, view_name, dialect, sql, column_aliases) " +
                             "VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)")) {
                 stmt.setLong(1, viewId);
-                stmt.setObject(2, UUID.randomUUID().toString(), java.sql.Types.OTHER);
+                setUuid(stmt, 2, UUID.randomUUID().toString());
                 stmt.setLong(3, tx.getNewSnapshotId());
                 stmt.setLong(4, schemaId);
                 stmt.setString(5, viewName);
@@ -1043,7 +1046,7 @@ public class JdbcDucklakeCatalog
                     "INSERT INTO ducklake_schema (schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative) " +
                             "VALUES (?, ?, ?, NULL, ?, ?, true)")) {
                 stmt.setLong(1, schemaId);
-                stmt.setObject(2, UUID.randomUUID().toString(), java.sql.Types.OTHER);
+                setUuid(stmt, 2, UUID.randomUUID().toString());
                 stmt.setLong(3, tx.getNewSnapshotId());
                 stmt.setString(4, schemaName);
                 stmt.setString(5, schemaName + "/");
@@ -1089,7 +1092,7 @@ public class JdbcDucklakeCatalog
                     "INSERT INTO ducklake_table (table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative) " +
                             "VALUES (?, ?, ?, NULL, ?, ?, ?, true)")) {
                 stmt.setLong(1, tableId);
-                stmt.setObject(2, UUID.randomUUID().toString(), java.sql.Types.OTHER);
+                setUuid(stmt, 2, UUID.randomUUID().toString());
                 stmt.setLong(3, tx.getNewSnapshotId());
                 stmt.setLong(4, schemaId);
                 stmt.setString(5, tableName);
@@ -1106,13 +1109,9 @@ public class JdbcDucklakeCatalog
                 topLevelColumnIds.put(column.name(), columnId);
             }
 
-            // 3. Insert table stats (empty table)
-            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                    "INSERT INTO ducklake_table_stats (table_id, record_count, next_row_id, file_size_bytes) " +
-                            "VALUES (?, 0, 0, 0)")) {
-                stmt.setLong(1, tableId);
-                stmt.executeUpdate();
-            }
+            // 3. Table stats are NOT created at CREATE TABLE time — DuckDB creates them
+            // only when data is first inserted. Creating them here with zeros causes
+            // DuckDB's GetGlobalTableStats to crash (GetValueInternal on NULL).
 
             // 4. Insert partition spec if provided
             if (partitionSpec.isPresent() && !partitionSpec.get().isEmpty()) {
@@ -1253,20 +1252,21 @@ public class JdbcDucklakeCatalog
         }
 
         executeWriteTransaction("insert into " + schemaName + "." + tableName, tx -> {
-            // Read current table stats
-            long currentNextRowId;
-            long currentRecordCount;
-            long currentFileSizeBytes;
+            // Read current table stats (may not exist yet — DuckDB creates them on first insert)
+            long currentNextRowId = 0;
+            long currentRecordCount = 0;
+            long currentFileSizeBytes = 0;
+            boolean tableStatsExist;
             try (PreparedStatement stmt = tx.getConnection().prepareStatement(
                     "SELECT record_count, next_row_id, file_size_bytes FROM ducklake_table_stats WHERE table_id = ?")) {
                 stmt.setLong(1, tableId);
                 try (ResultSet rs = stmt.executeQuery()) {
-                    if (!rs.next()) {
-                        throw new RuntimeException("No table stats found for table_id=" + tableId);
+                    tableStatsExist = rs.next();
+                    if (tableStatsExist) {
+                        currentRecordCount = rs.getLong("record_count");
+                        currentNextRowId = rs.getLong("next_row_id");
+                        currentFileSizeBytes = rs.getLong("file_size_bytes");
                     }
-                    currentRecordCount = rs.getLong("record_count");
-                    currentNextRowId = rs.getLong("next_row_id");
-                    currentFileSizeBytes = rs.getLong("file_size_bytes");
                 }
             }
 
@@ -1334,14 +1334,26 @@ public class JdbcDucklakeCatalog
                 totalFileSize += fragment.fileSizeBytes();
             }
 
-            // Update ducklake_table_stats
-            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                    "UPDATE ducklake_table_stats SET record_count = ?, next_row_id = ?, file_size_bytes = ? WHERE table_id = ?")) {
-                stmt.setLong(1, currentRecordCount + totalRecords);
-                stmt.setLong(2, currentNextRowId + totalRecords);
-                stmt.setLong(3, currentFileSizeBytes + totalFileSize);
-                stmt.setLong(4, tableId);
-                stmt.executeUpdate();
+            // Insert or update ducklake_table_stats
+            if (tableStatsExist) {
+                try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                        "UPDATE ducklake_table_stats SET record_count = ?, next_row_id = ?, file_size_bytes = ? WHERE table_id = ?")) {
+                    stmt.setLong(1, currentRecordCount + totalRecords);
+                    stmt.setLong(2, currentNextRowId + totalRecords);
+                    stmt.setLong(3, currentFileSizeBytes + totalFileSize);
+                    stmt.setLong(4, tableId);
+                    stmt.executeUpdate();
+                }
+            }
+            else {
+                try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                        "INSERT INTO ducklake_table_stats (table_id, record_count, next_row_id, file_size_bytes) VALUES (?, ?, ?, ?)")) {
+                    stmt.setLong(1, tableId);
+                    stmt.setLong(2, totalRecords);
+                    stmt.setLong(3, totalRecords);
+                    stmt.setLong(4, totalFileSize);
+                    stmt.executeUpdate();
+                }
             }
 
             // Upsert ducklake_table_column_stats: aggregate min/max/null across all fragments per column
@@ -1414,6 +1426,17 @@ public class JdbcDucklakeCatalog
 
             tx.addChange("inserted_into_table:" + tableId);
         });
+    }
+
+    private void setUuid(PreparedStatement stmt, int index, String uuid)
+            throws SQLException
+    {
+        if (isPostgresql) {
+            stmt.setObject(index, uuid, java.sql.Types.OTHER);
+        }
+        else {
+            stmt.setString(index, uuid);
+        }
     }
 
     private static void setNullableString(PreparedStatement stmt, int index, String value)
