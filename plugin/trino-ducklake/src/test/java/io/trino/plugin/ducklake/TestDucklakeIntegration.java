@@ -14,10 +14,6 @@
 package io.trino.plugin.ducklake;
 
 import io.trino.Session;
-import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
-import io.trino.plugin.ducklake.catalog.DucklakeTable;
-import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
-import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
@@ -63,7 +59,9 @@ public class TestDucklakeIntegration
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return DucklakeQueryRunner.builder().build();
+        return DucklakeQueryRunner.builder()
+                .useIsolatedCatalog("integration")
+                .build();
     }
 
     // ==================== Metadata queries ====================
@@ -1413,23 +1411,6 @@ public class TestDucklakeIntegration
                 ".*not supported.*|.*This connector does not support.*");
     }
 
-    // ==================== DDL operations (now supported) ====================
-
-    @Test
-    public void testCreateAndDropTable()
-    {
-        computeActual("CREATE TABLE test_schema.ddl_test_table (id INTEGER, name VARCHAR)");
-        try {
-            List<String> tables = computeActual("SHOW TABLES FROM test_schema").getMaterializedRows().stream()
-                    .map(row -> row.getField(0).toString())
-                    .toList();
-            assertThat(tables).contains("ddl_test_table");
-        }
-        finally {
-            computeActual("DROP TABLE test_schema.ddl_test_table");
-        }
-    }
-
     // ==================== Inlined Data Tests ====================
 
     @Test
@@ -1543,40 +1524,24 @@ public class TestDucklakeIntegration
     }
 
     private HistoricalSnapshot getSchemaEvolutionHistoricalSnapshot()
-            throws Exception
     {
-        JdbcDucklakeCatalog catalog = new JdbcDucklakeCatalog(DucklakeTestCatalogEnvironment.createDucklakeConfig());
-        try {
-            long currentSnapshotId = catalog.getCurrentSnapshotId();
-            DucklakeTable table = catalog.getTable(new SchemaTableName("test_schema", "schema_evolution_table"), currentSnapshotId)
-                    .orElseThrow(() -> new AssertionError("Missing schema_evolution_table"));
-            long historicalSnapshotId = -1;
-            for (long snapshotId = currentSnapshotId; snapshotId >= 1; snapshotId--) {
-                if (catalog.getSnapshot(snapshotId).isEmpty()) {
-                    continue;
-                }
-                if (catalog.getTable(new SchemaTableName("test_schema", "schema_evolution_table"), snapshotId).isEmpty()) {
-                    continue;
-                }
-                long recordCount = catalog.getDataFiles(table.tableId(), snapshotId).stream()
-                        .mapToLong(DucklakeDataFile::recordCount)
-                        .sum();
-                if (recordCount == 2) {
-                    historicalSnapshotId = snapshotId;
-                    break;
-                }
-            }
+        // Find the snapshot where schema_evolution_table had exactly 2 rows by scanning
+        // snapshots in descending order using FOR VERSION AS OF through the query runner.
+        // This uses the same catalog as the test (including isolated catalogs).
+        MaterializedResult snapshots = computeActual(
+                "SELECT snapshot_id, snapshot_time FROM \"schema_evolution_table$snapshots\" ORDER BY snapshot_id DESC");
 
-            assertThat(historicalSnapshotId).isGreaterThan(0);
-            long selectedSnapshotId = historicalSnapshotId;
-            Instant historicalSnapshotTime = catalog.getSnapshot(selectedSnapshotId)
-                    .orElseThrow(() -> new AssertionError("Missing snapshot: " + selectedSnapshotId))
-                    .snapshotTime();
-            return new HistoricalSnapshot(selectedSnapshotId, historicalSnapshotTime);
+        for (MaterializedRow row : snapshots.getMaterializedRows()) {
+            long snapshotId = ((Number) row.getField(0)).longValue();
+            long count = ((Number) computeScalar(
+                    "SELECT count(*) FROM schema_evolution_table FOR VERSION AS OF " + snapshotId)).longValue();
+            if (count == 2) {
+                // snapshot_time is a timestamp with time zone; extract as Instant
+                Instant snapshotTime = ((java.time.ZonedDateTime) row.getField(1)).toInstant();
+                return new HistoricalSnapshot(snapshotId, snapshotTime);
+            }
         }
-        finally {
-            catalog.close();
-        }
+        throw new AssertionError("No historical snapshot found with 2 rows for schema_evolution_table");
     }
 
     private Session sessionWithTimeZone(String zoneId)

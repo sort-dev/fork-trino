@@ -389,7 +389,7 @@ Total mandatory scenarios: 9.
 
 ## Immediate Next 5 Tasks (next sprint)
 
-1. [ ] Isolate `TestDucklakeIntegration` with its own catalog to fix flaky `testSnapshotsAndCurrentSnapshotMetadataTables` (DDL tests pollute shared catalog snapshot count).
+1. [x] Isolate `TestDucklakeIntegration` with its own catalog to fix flaky `testSnapshotsAndCurrentSnapshotMetadataTables` (DDL tests pollute shared catalog snapshot count).
 2. [ ] Cross-engine validation with PostgreSQL catalog (bypass SQLite visibility issue).
 3. [ ] Partitioned data writes: compute partition values, write `ducklake_file_partition_value` rows.
 4. [ ] `DELETE` support: write delete Parquet files + `ducklake_delete_file` metadata rows.
