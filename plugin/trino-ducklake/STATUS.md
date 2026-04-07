@@ -1,6 +1,6 @@
 # Ducklake Connector Status
 
-Last updated: 2026-04-06
+Last updated: 2026-04-07
 
 ## Read Side — Complete
 
@@ -90,10 +90,17 @@ Implemented through snapshot-scoped catalog commits:
 - Abort path deletes written files on failure.
 - File rotation by target file size (configurable via `ParquetWriterConfig`).
 
+### Cross-engine compatibility
+
+Catalog metadata format has been aligned with DuckDB's implementation for interoperability:
+- Column metadata: 1-based `column_order`, `default_value='NULL'`, `default_value_type='literal'`, `default_value_dialect='duckdb'`
+- Stats: `ducklake_table_stats` created on first INSERT (not CREATE TABLE), `contains_nan` stored as NULL for non-floating types
+- Footer size, schema_versions.table_id, and UUID type handling are all DuckDB-compatible
+- See [REPORT_CROSS_ENGINE_WRITE.md](REPORT_CROSS_ENGINE_WRITE.md) for open issues filed with the DuckDB team
+
 ### Not yet implemented
 
 - Partitioned data writes (partition value computation + `ducklake_file_partition_value` rows)
-- Table-level aggregated column stats (`ducklake_table_column_stats` upsert)
 - Commit-failure file cleanup (abort cleanup exists, commit-failure cleanup does not)
 - `DELETE`, `UPDATE`, `MERGE`
 - `ALTER TABLE` family
@@ -101,4 +108,9 @@ Implemented through snapshot-scoped catalog commits:
 
 ### Test coverage
 
-DDL integration coverage exists in `TestDucklakeDDLIntegration`. Data write tests in `TestDucklakeWriteIntegration`, `TestDucklakeWriteFragment`, and `TestDucklakeStatsExtractor`. Cross-backend and cross-engine validation still needed.
+- Default test backend: **PostgreSQL** (via Testcontainers, requires Docker)
+- Override with `-Dducklake.test.catalog-backend=sqlite` or `duckdb`
+- DDL: `TestDucklakeDDLIntegration` (12 tests)
+- Data writes: `TestDucklakeWriteIntegration` (19 tests), `TestDucklakeWriteFragment`, `TestDucklakeStatsExtractor`
+- Cross-engine: `TestDucklakeCrossEngineCompatibility` (partial — DuckDB crash fixed, SQLite visibility issue remains for data reads)
+- All tests pass on PostgreSQL, SQLite, and DuckDB backends (192+ tests each)

@@ -151,17 +151,10 @@ cd plugin/trino-ducklake
 mvn test
 ```
 
-Run the same test suite against PostgreSQL catalog backend:
-
-```bash
-cd plugin/trino-ducklake
-mvn test -Dducklake.test.catalog-backend=postgresql
-```
-
 Notes:
-- `ducklake.test.catalog-backend` defaults to `sqlite`.
-- PostgreSQL test mode uses Testcontainers and requires a working Docker environment.
-- `TestDucklakeDeleteFileHandling` is SQLite-only (it mutates SQLite catalog files directly).
+- **Default test backend is PostgreSQL** (uses Testcontainers, requires Docker).
+- Override with `-Dducklake.test.catalog-backend=sqlite` or `duckdb`.
+- `TestDucklakeDeleteFileHandling` is SQLite-only (it mutates SQLite catalog files directly) and auto-skips on other backends.
 - Current local workflow is module-scoped: run from `plugin/trino-ducklake` using `../../mvnw ...`.
 - This module disables `ReportLeakedContainers` by default during tests to avoid Podman Docker API compatibility noise
   (`unknown container state: restarting`).
@@ -178,21 +171,15 @@ cd plugin/trino-ducklake
 Targeted runs:
 
 ```bash
-# Full integration tests
+# Full integration tests (PostgreSQL by default)
 mvn test -Dtest=TestDucklakeIntegration
 
-# Catalog metadata
-mvn test -Dtest=TestDucklakeCatalog
+# Write integration tests
+mvn test -Dtest=TestDucklakeWriteIntegration
 
-# Split pruning + partition pruning
-mvn test -Dtest=TestDucklakeSplitManager,TestDucklakePartitionPruning
+# SQLite backend
+mvn test -Dducklake.test.catalog-backend=sqlite -Dtest=TestDucklakeIntegration
 
-# Page source + delete handling
-mvn test -Dtest=TestDucklakePageSourceProvider,TestDucklakeDeleteFileHandling
-
-# Targeted PostgreSQL backend runs
-mvn test -Dducklake.test.catalog-backend=postgresql -Dtest=TestDucklakeCatalog,TestDucklakeSplitManager
-
-# Targeted DuckDB backend runs
-mvn test -Dducklake.test.catalog-backend=duckdb -Dtest=TestDucklakeCatalog,TestDucklakeSplitManager
+# DuckDB backend
+mvn test -Dducklake.test.catalog-backend=duckdb -Dtest=TestDucklakeIntegration
 ```

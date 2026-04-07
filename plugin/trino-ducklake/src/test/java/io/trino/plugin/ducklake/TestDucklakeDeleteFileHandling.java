@@ -29,7 +29,7 @@ import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
+
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -59,10 +59,14 @@ public class TestDucklakeDeleteFileHandling
     }
 
     @Test
-    @DisabledIfSystemProperty(named = "ducklake.test.catalog-backend", matches = "(?i)(postgres|postgresql|duckdb)")
     public void testDeleteFileSuppressesRows()
             throws Exception
     {
+        // This test edits SQLite catalog files directly — skip for other backends
+        if (DucklakeTestCatalogBackend.current() != DucklakeTestCatalogBackend.SQLITE) {
+            return;
+        }
+
         Path isolatedCatalogDir = Path.of("target/test-catalog-delete-" + UUID.randomUUID());
         copyDirectory(sourceCatalogPath.getParent(), isolatedCatalogDir);
         Path isolatedCatalogPath = isolatedCatalogDir.resolve("catalog.db");

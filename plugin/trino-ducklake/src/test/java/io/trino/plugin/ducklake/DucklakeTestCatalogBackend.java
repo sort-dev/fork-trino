@@ -25,7 +25,7 @@ public enum DucklakeTestCatalogBackend
 
     public static DucklakeTestCatalogBackend current()
     {
-        String value = System.getProperty(BACKEND_PROPERTY, SQLITE.name()).trim();
+        String value = System.getProperty(BACKEND_PROPERTY, POSTGRESQL.name()).trim();
         return switch (value.toLowerCase(ENGLISH)) {
             case "sqlite" -> SQLITE;
             case "postgres", "postgresql" -> POSTGRESQL;
