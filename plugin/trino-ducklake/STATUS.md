@@ -1,6 +1,6 @@
 # Ducklake Connector Status
 
-Last updated: 2026-04-05
+Last updated: 2026-04-06
 
 ## Read Side — Complete
 
@@ -64,9 +64,11 @@ Stale inlined metadata pointers remain non-fatal. If metadata references an inli
 ### Catalog backend
 Catalog implementation now routes by JDBC URL (`jdbc:sqlite:` / `jdbc:postgresql:`) with a shared JDBC code path. SQLite and PostgreSQL are both covered by tests. DuckDB-as-catalog-backend remains unverified.
 
-## Write Side — Partial Implementation
+## Write Side — Data Writes Implemented
 
-Metadata write operations are now implemented through snapshot-scoped catalog commits:
+### DDL (metadata-only writes)
+
+Implemented through snapshot-scoped catalog commits:
 
 - Views: `CREATE VIEW`, `DROP VIEW`
 - Schemas: `CREATE SCHEMA`, `DROP SCHEMA` (non-empty schema drop rejected)
@@ -75,13 +77,28 @@ Metadata write operations are now implemented through snapshot-scoped catalog co
   - supports partition spec parsing from `WITH (partitioned_by = ARRAY[...])`
   - `SAVE MODE REPLACE` remains unsupported
 
-Write operations still not implemented:
+### DML (data writes)
 
-- `INSERT`
-- `CREATE TABLE AS SELECT`
-- `DELETE`
-- `UPDATE`
-- `MERGE`
+`INSERT` and `CREATE TABLE AS SELECT` are now implemented for unpartitioned tables:
+
+- `DucklakePageSink` writes Parquet data files via Trino's `ParquetWriter` (ZSTD compression, configurable block/page size).
+- `DucklakePageSinkProvider` handles both INSERT and CTAS through a shared `DucklakeWritableTableHandle`.
+- `DucklakeStatsExtractor` extracts per-column statistics from Parquet footer metadata.
+- `DucklakePathResolver` resolves table data paths from catalog/schema/table hierarchy.
+- `DucklakeMetadata` implements `beginInsert`/`finishInsert` and `beginCreateTable`/`finishCreateTable`.
+- `JdbcDucklakeCatalog.commitInsert()` atomically commits data file rows, file column stats, and table stats updates in a single write transaction.
+- Abort path deletes written files on failure.
+- File rotation by target file size (configurable via `ParquetWriterConfig`).
+
+### Not yet implemented
+
+- Partitioned data writes (partition value computation + `ducklake_file_partition_value` rows)
+- Table-level aggregated column stats (`ducklake_table_column_stats` upsert)
+- Commit-failure file cleanup (abort cleanup exists, commit-failure cleanup does not)
+- `DELETE`, `UPDATE`, `MERGE`
 - `ALTER TABLE` family
+- Maintenance operations (optimize, rewrite, expire snapshots, etc.)
 
-Current tests still treat data writes as unsupported in `TestDucklakeIntegration`. New DDL integration coverage exists in `TestDucklakeDDLIntegration` in this branch/worktree, and broader write validation should still move toward Trino's `BaseConnectorTest` once data-write SPI paths are implemented.
+### Test coverage
+
+DDL integration coverage exists in `TestDucklakeDDLIntegration`. Data write tests in `TestDucklakeWriteIntegration`, `TestDucklakeWriteFragment`, and `TestDucklakeStatsExtractor`. Cross-backend and cross-engine validation still needed.

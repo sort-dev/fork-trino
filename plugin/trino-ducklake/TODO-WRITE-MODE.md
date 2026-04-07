@@ -1,6 +1,6 @@
 # DuckLake Write Mode Plan (Trino Connector)
 
-Last updated: 2026-04-05
+Last updated: 2026-04-06
 
 ## Objective
 
@@ -176,27 +176,25 @@ Exit criteria:
 
 - We can run a multi-statement metadata mutation atomically in each backend (`sqlite`, `duckdb`, `postgresql`).
 
-## M1: Connector Write Plumbing
+## M1: Connector Write Plumbing ✓
 
-- [ ] Add writable handle types:
-  - `DucklakeOutputTableHandle`
-  - `DucklakeInsertTableHandle`
-  - shared `DucklakeWritableTableHandle`
+- [x] Add writable handle types:
+  - shared `DucklakeWritableTableHandle` (implements both `ConnectorInsertTableHandle` and `ConnectorOutputTableHandle`)
   - `DucklakeWriteFragment` (serialized file metadata + stats)
-- [ ] Add `DucklakePageSinkProvider`.
-- [ ] Add `DucklakePageSink` with:
-  - partition-aware writer indexing
-  - file writer rotation by size
+- [x] Add `DucklakePageSinkProvider`.
+- [x] Add `DucklakePageSink` with:
+  - file writer rotation by target file size
   - fragment emission on finish
-  - abort rollback
-- [ ] Wire connector/module:
-  - add `getPageSinkProvider()` in `DucklakeConnector`
-  - bind provider + classloader-safe wrapper in `DucklakeModule`
-  - bind `ParquetWriterConfig`
+  - abort rollback (deletes written files)
+- [x] Wire connector/module:
+  - `getPageSinkProvider()` in `DucklakeConnector`
+  - `ClassLoaderSafeConnectorPageSinkProvider` wrapper in `DucklakeModule`
+  - `ParquetWriterConfig` bound
+  - `DucklakePathResolver` bound as singleton
 
 Exit criteria:
 
-- Engine can call write SPI paths (`beginInsert`/`finishInsert`, `beginCreateTable`/`finishCreateTable`) end-to-end.
+- ~~Engine can call write SPI paths (`beginInsert`/`finishInsert`, `beginCreateTable`/`finishCreateTable`) end-to-end.~~ Done.
 
 ## M2: DDL Metadata Writes
 
@@ -225,50 +223,51 @@ Exit criteria:
 
 ## M3: INSERT (Core Data Write)
 
-### M3a File writing
+### M3a File writing ✓
 
-- [ ] Write Parquet data files through reusable writer infra.
-- [ ] Build output path from catalog `data_path` + schema path + table path.
-- [ ] Support unpartitioned and partitioned writes.
-- [ ] Generate stable filenames (`ducklake-<uuid>.parquet`).
+- [x] Write Parquet data files through reusable Trino `ParquetWriter` with ZSTD compression.
+- [x] Build output path from catalog `data_path` + schema path + table path via `DucklakePathResolver`.
+- [x] Generate stable filenames (`ducklake-<uuid>.parquet`).
+- [x] Extract file-level column statistics via `DucklakeStatsExtractor` from Parquet footer.
+- [ ] Support partitioned writes (partition-aware writer indexing not yet implemented).
 
-### M3b Metadata commit
+### M3b Metadata commit ✓
 
-- [ ] Allocate `data_file_id` from snapshot `next_file_id`.
-- [ ] Insert `ducklake_data_file` rows:
+- [x] Allocate `data_file_id` from snapshot `next_file_id`.
+- [x] Insert `ducklake_data_file` rows:
   - `begin_snapshot = new snapshot`
   - `end_snapshot = NULL`
   - `row_id_start` from table `next_row_id` prefix sums
   - `file_format='parquet'`
   - `path_is_relative=true`
-  - `partition_id` when partitioned
-- [ ] Insert `ducklake_file_column_stats` from fragment stats.
-- [ ] Upsert/merge `ducklake_table_column_stats`.
-- [ ] Update `ducklake_table_stats`:
+- [x] Insert `ducklake_file_column_stats` from fragment stats.
+- [x] Update `ducklake_table_stats`:
   - `record_count += written_rows`
   - `next_row_id += written_rows`
   - `file_size_bytes += written_bytes`
+- [x] Insert snapshot + changes (`inserted_into_table:<table_id>`).
 - [ ] Insert `ducklake_file_partition_value` for partitioned files.
-- [ ] Insert snapshot + changes (`inserted_into_table:<table_id>`).
+- [ ] Upsert/merge `ducklake_table_column_stats` (table-level aggregated stats).
 
-### M3c Correctness + cleanup
+### M3c Correctness + cleanup — Partial
 
+- [x] On abort, delete newly written files best-effort (in `DucklakePageSink.abort()`).
 - [ ] On commit failure, delete newly written files best-effort.
 - [ ] Ensure idempotent abort path.
 
 Exit criteria:
 
-- `INSERT` works for Trino-created tables in all three catalogs and remains readable by DuckDB.
+- ~~`INSERT` works for Trino-created tables in all three catalogs and remains readable by DuckDB.~~ INSERT works for unpartitioned tables. Partitioned write support and cross-engine validation still needed.
 
-## M4: CTAS
+## M4: CTAS ✓
 
-- [ ] Implement `beginCreateTable` / `finishCreateTable` with write fragments.
-- [ ] Prefer a single atomic snapshot containing both create-table metadata and inserted files.
+- [x] Implement `beginCreateTable` / `finishCreateTable` with write fragments.
+- [x] `finishCreateTable` calls `catalog.commitInsert()` to attach data files in the same flow as table creation.
 - [ ] Ensure drop-on-failure semantics for partially written data files.
 
 Exit criteria:
 
-- `CREATE TABLE ... AS SELECT` passes connector tests and cross-engine validation.
+- ~~`CREATE TABLE ... AS SELECT` passes connector tests and cross-engine validation.~~ CTAS works for unpartitioned tables. Cross-engine validation still needed.
 
 ## M5: Partitioning + Type Completeness for Writes
 
@@ -370,7 +369,8 @@ Total mandatory scenarios: 9.
 
 - [x] DDL (`CREATE/DROP SCHEMA`, `CREATE/DROP TABLE`) implemented.
 - [ ] DDL (`CREATE/DROP SCHEMA`, `CREATE/DROP TABLE`) validated in all three catalogs.
-- [ ] `INSERT` and `CTAS` implemented and validated in all three catalogs.
+- [x] `INSERT` and `CTAS` implemented (unpartitioned).
+- [ ] `INSERT` and `CTAS` validated in all three catalogs.
 - [ ] 9-scenario interoperability matrix green.
 - [ ] No regressions on existing read-path suites.
 - [ ] `STATUS.md` updated with exact write capability coverage and any explicit non-goals.
@@ -386,10 +386,10 @@ Total mandatory scenarios: 9.
 - [ ] Temporal partition encoding mismatch:
   - Keep DuckDB-compatible behavior today, but add compatibility to handle both calendar and epoch encodings so behavior remains correct as upstream adds epoch support.
 
-## Immediate Next 5 Tasks (first implementation sprint)
+## Immediate Next 5 Tasks (current sprint)
 
-1. [ ] Add writable handles + `DucklakePageSinkProvider` + `DucklakePageSink` skeleton.
-2. [ ] Implement `beginInsert`/`finishInsert` for unpartitioned tables.
-3. [ ] Implement CTAS (`beginCreateTable` / `finishCreateTable`) using write fragments.
-4. [ ] Add/enable DDL integration tests in the standard module test suite across backends.
+1. [x] ~~Add writable handles + `DucklakePageSinkProvider` + `DucklakePageSink` skeleton.~~
+2. [x] ~~Implement `beginInsert`/`finishInsert` for unpartitioned tables.~~
+3. [x] ~~Implement CTAS (`beginCreateTable` / `finishCreateTable`) using write fragments.~~
+4. [ ] Validate INSERT/CTAS end-to-end across all three backends (sqlite, duckdb, postgresql).
 5. [ ] Add first cross-engine data-write test: `sqlite` catalog, Trino-create + Trino-insert + DuckDB-read.

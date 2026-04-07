@@ -8,11 +8,13 @@ Reads Ducklake metadata from a JDBC catalog database (SQLite or PostgreSQL) and 
 
 Supported today:
 - Full read path (current snapshot, time travel, metadata tables, pruning).
-- Metadata writes: `CREATE/DROP VIEW`, `CREATE/DROP SCHEMA`, `CREATE/DROP TABLE`.
+- DDL writes: `CREATE/DROP VIEW`, `CREATE/DROP SCHEMA`, `CREATE/DROP TABLE`.
 - Table DDL with nested types (`ARRAY`, `ROW`, `MAP`) and `partitioned_by` table property parsing.
+- Data writes: `INSERT` and `CREATE TABLE AS SELECT` (unpartitioned tables).
 
 Not yet supported:
-- Data writes and row-level mutations: `INSERT`, `CTAS`, `DELETE`, `UPDATE`, `MERGE`.
+- Partitioned data writes.
+- Row-level mutations: `DELETE`, `UPDATE`, `MERGE`.
 - `ALTER TABLE` family.
 
 ## Documentation
