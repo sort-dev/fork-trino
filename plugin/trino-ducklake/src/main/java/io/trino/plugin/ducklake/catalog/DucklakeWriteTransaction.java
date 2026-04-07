@@ -35,6 +35,7 @@ class DucklakeWriteTransaction
     private long schemaVersion;
     private long nextCatalogId;
     private long nextFileId;
+    private long schemaVersionTableId = -1;
     private final List<String> changes = new ArrayList<>();
 
     DucklakeWriteTransaction(Connection connection, long currentSnapshotId,
@@ -153,10 +154,18 @@ class DucklakeWriteTransaction
     /**
      * Increments the schema version. Called for DDL operations that change
      * the table/column structure (create table, drop table, alter table, etc.).
+     *
+     * @param tableId the table being modified (used in ducklake_schema_versions)
      */
-    public void incrementSchemaVersion()
+    public void incrementSchemaVersion(long tableId)
     {
         schemaVersion++;
+        schemaVersionTableId = tableId;
+    }
+
+    long getSchemaVersionTableId()
+    {
+        return schemaVersionTableId;
     }
 
     /**

@@ -209,12 +209,26 @@ public class DucklakePageSink
         long recordCount = fileMetaData.getNum_rows();
         long fileSize = currentWriter.getWrittenBytes();
 
+        // Compute footer size by serializing the metadata (matches what ParquetWriter wrote)
+        long footerSize;
+        try {
+            io.airlift.slice.DynamicSliceOutput footerOutput = new io.airlift.slice.DynamicSliceOutput(40);
+            org.apache.parquet.format.Util.writeFileMetaData(fileMetaData, footerOutput);
+            footerSize = footerOutput.size();
+        }
+        catch (IOException e) {
+            // Fall back to computing from file layout: fileSize - 4(magic) - data - 4(footerLen) - 4(magic)
+            // This shouldn't happen since we just successfully wrote the file
+            footerSize = 0;
+        }
+
         List<DucklakeFileColumnStats> columnStats =
                 DucklakeStatsExtractor.extractStats(fileMetaData, handle.columns());
 
         completedFragments.add(new DucklakeWriteFragment(
                 currentFileName,
                 fileSize,
+                footerSize,
                 recordCount,
                 columnStats));
 

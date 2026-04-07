@@ -937,9 +937,15 @@ public class JdbcDucklakeCatalog
                 // 4. Insert schema_versions row if schema version changed
                 if (tx.getSchemaVersion() != schemaVersion) {
                     try (PreparedStatement stmt = conn.prepareStatement(
-                            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) VALUES (?, ?)")) {
+                            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version, table_id) VALUES (?, ?, ?)")) {
                         stmt.setLong(1, tx.getNewSnapshotId());
                         stmt.setLong(2, tx.getSchemaVersion());
+                        if (tx.getSchemaVersionTableId() >= 0) {
+                            stmt.setLong(3, tx.getSchemaVersionTableId());
+                        }
+                        else {
+                            stmt.setNull(3, java.sql.Types.BIGINT);
+                        }
                         stmt.executeUpdate();
                     }
                 }
@@ -978,7 +984,7 @@ public class JdbcDucklakeCatalog
                     "INSERT INTO ducklake_view (view_id, view_uuid, begin_snapshot, end_snapshot, schema_id, view_name, dialect, sql, column_aliases) " +
                             "VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)")) {
                 stmt.setLong(1, viewId);
-                stmt.setString(2, UUID.randomUUID().toString());
+                stmt.setObject(2, UUID.randomUUID().toString(), java.sql.Types.OTHER);
                 stmt.setLong(3, tx.getNewSnapshotId());
                 stmt.setLong(4, schemaId);
                 stmt.setString(5, viewName);
@@ -1037,7 +1043,7 @@ public class JdbcDucklakeCatalog
                     "INSERT INTO ducklake_schema (schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative) " +
                             "VALUES (?, ?, ?, NULL, ?, ?, true)")) {
                 stmt.setLong(1, schemaId);
-                stmt.setString(2, UUID.randomUUID().toString());
+                stmt.setObject(2, UUID.randomUUID().toString(), java.sql.Types.OTHER);
                 stmt.setLong(3, tx.getNewSnapshotId());
                 stmt.setString(4, schemaName);
                 stmt.setString(5, schemaName + "/");
@@ -1083,7 +1089,7 @@ public class JdbcDucklakeCatalog
                     "INSERT INTO ducklake_table (table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative) " +
                             "VALUES (?, ?, ?, NULL, ?, ?, ?, true)")) {
                 stmt.setLong(1, tableId);
-                stmt.setString(2, UUID.randomUUID().toString());
+                stmt.setObject(2, UUID.randomUUID().toString(), java.sql.Types.OTHER);
                 stmt.setLong(3, tx.getNewSnapshotId());
                 stmt.setLong(4, schemaId);
                 stmt.setString(5, tableName);
@@ -1092,8 +1098,9 @@ public class JdbcDucklakeCatalog
             }
 
             // 2. Insert column rows (flattening nested types with parent links)
+            // column_order is 1-based per DuckDB convention
             Map<String, Long> topLevelColumnIds = new LinkedHashMap<>();
-            long columnOrder = 0;
+            long columnOrder = 1;
             for (TableColumnSpec column : columns) {
                 long columnId = insertColumnTree(tx, tableId, column, columnOrder++, OptionalLong.empty());
                 topLevelColumnIds.put(column.name(), columnId);
@@ -1139,7 +1146,7 @@ public class JdbcDucklakeCatalog
                 }
             }
 
-            tx.incrementSchemaVersion();
+            tx.incrementSchemaVersion(tableId);
             tx.addChange("created_table:" + tableName);
         });
     }
@@ -1156,8 +1163,9 @@ public class JdbcDucklakeCatalog
 
         try (PreparedStatement stmt = tx.getConnection().prepareStatement(
                 "INSERT INTO ducklake_column (column_id, begin_snapshot, end_snapshot, table_id, column_order, " +
-                        "column_name, column_type, initial_default, default_value, nulls_allowed, parent_column) " +
-                        "VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, NULL, ?, ?)")) {
+                        "column_name, column_type, initial_default, default_value, nulls_allowed, parent_column, " +
+                        "default_value_type, default_value_dialect) " +
+                        "VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, 'NULL', ?, ?, 'literal', 'duckdb')")) {
             stmt.setLong(1, columnId);
             stmt.setLong(2, tx.getNewSnapshotId());
             stmt.setLong(3, tableId);
@@ -1232,7 +1240,7 @@ public class JdbcDucklakeCatalog
                 stmt.executeUpdate();
             }
 
-            tx.incrementSchemaVersion();
+            tx.incrementSchemaVersion(tableId);
             tx.addChange("dropped_table:" + tableId);
         });
     }
@@ -1274,15 +1282,16 @@ public class JdbcDucklakeCatalog
                         "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, " +
                                 "file_order, path, path_is_relative, file_format, record_count, file_size_bytes, " +
                                 "footer_size, row_id_start) " +
-                                "VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, 0, ?)")) {
+                                "VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, ?, ?)")) {
                     stmt.setLong(1, dataFileId);
                     stmt.setLong(2, tableId);
                     stmt.setLong(3, tx.getNewSnapshotId());
-                    stmt.setLong(4, dataFileId); // file_order = data_file_id for uniqueness
+                    stmt.setNull(4, java.sql.Types.BIGINT); // file_order: NULL matches DuckDB convention
                     stmt.setString(5, fragment.path());
                     stmt.setLong(6, fragment.recordCount());
                     stmt.setLong(7, fragment.fileSizeBytes());
-                    stmt.setLong(8, runningRowId);
+                    stmt.setLong(8, fragment.footerSize());
+                    stmt.setLong(9, runningRowId);
                     stmt.executeUpdate();
                 }
 
@@ -1310,7 +1319,12 @@ public class JdbcDucklakeCatalog
                         else {
                             stmt.setNull(8, java.sql.Types.VARCHAR);
                         }
-                        stmt.setBoolean(9, colStats.containsNan());
+                        if (colStats.containsNan()) {
+                            stmt.setBoolean(9, true);
+                        }
+                        else {
+                            stmt.setNull(9, java.sql.Types.BOOLEAN);
+                        }
                         stmt.executeUpdate();
                     }
                 }
@@ -1330,8 +1344,117 @@ public class JdbcDucklakeCatalog
                 stmt.executeUpdate();
             }
 
+            // Upsert ducklake_table_column_stats: aggregate min/max/null across all fragments per column
+            Map<Long, AggregatedColumnStats> columnAggregates = new LinkedHashMap<>();
+            for (DucklakeWriteFragment fragment : fragments) {
+                for (DucklakeFileColumnStats colStats : fragment.columnStats()) {
+                    columnAggregates.computeIfAbsent(colStats.columnId(), id -> new AggregatedColumnStats())
+                            .merge(colStats);
+                }
+            }
+
+            for (Map.Entry<Long, AggregatedColumnStats> entry : columnAggregates.entrySet()) {
+                long columnId = entry.getKey();
+                AggregatedColumnStats agg = entry.getValue();
+
+                // Check if row exists already (from prior insert)
+                boolean exists;
+                try (PreparedStatement check = tx.getConnection().prepareStatement(
+                        "SELECT 1 FROM ducklake_table_column_stats WHERE table_id = ? AND column_id = ?")) {
+                    check.setLong(1, tableId);
+                    check.setLong(2, columnId);
+                    try (ResultSet rs = check.executeQuery()) {
+                        exists = rs.next();
+                    }
+                }
+
+                if (exists) {
+                    // Merge with existing: widen min/max, OR contains_null/contains_nan
+                    try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                            "UPDATE ducklake_table_column_stats SET " +
+                                    "contains_null = CASE WHEN contains_null = 1 THEN 1 WHEN ? = 1 THEN 1 ELSE 0 END, " +
+                                    "contains_nan = CASE WHEN ? = 1 THEN 1 ELSE contains_nan END, " +
+                                    "min_value = CASE WHEN min_value IS NULL THEN ? WHEN ? IS NULL THEN min_value WHEN ? < min_value THEN ? ELSE min_value END, " +
+                                    "max_value = CASE WHEN max_value IS NULL THEN ? WHEN ? IS NULL THEN max_value WHEN ? > max_value THEN ? ELSE max_value END " +
+                                    "WHERE table_id = ? AND column_id = ?")) {
+                        stmt.setInt(1, agg.containsNull ? 1 : 0);
+                        stmt.setInt(2, agg.containsNan ? 1 : 0);
+                        setNullableString(stmt, 3, agg.minValue);
+                        setNullableString(stmt, 4, agg.minValue);
+                        setNullableString(stmt, 5, agg.minValue);
+                        setNullableString(stmt, 6, agg.minValue);
+                        setNullableString(stmt, 7, agg.maxValue);
+                        setNullableString(stmt, 8, agg.maxValue);
+                        setNullableString(stmt, 9, agg.maxValue);
+                        setNullableString(stmt, 10, agg.maxValue);
+                        stmt.setLong(11, tableId);
+                        stmt.setLong(12, columnId);
+                        stmt.executeUpdate();
+                    }
+                }
+                else {
+                    try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                            "INSERT INTO ducklake_table_column_stats (table_id, column_id, contains_null, contains_nan, min_value, max_value) " +
+                                    "VALUES (?, ?, ?, ?, ?, ?)")) {
+                        stmt.setLong(1, tableId);
+                        stmt.setLong(2, columnId);
+                        stmt.setLong(3, agg.containsNull ? 1 : 0);
+                        if (agg.containsNan) {
+                            stmt.setLong(4, 1);
+                        }
+                        else {
+                            stmt.setNull(4, java.sql.Types.BIGINT);
+                        }
+                        setNullableString(stmt, 5, agg.minValue);
+                        setNullableString(stmt, 6, agg.maxValue);
+                        stmt.executeUpdate();
+                    }
+                }
+            }
+
             tx.addChange("inserted_into_table:" + tableId);
         });
+    }
+
+    private static void setNullableString(PreparedStatement stmt, int index, String value)
+            throws SQLException
+    {
+        if (value != null) {
+            stmt.setString(index, value);
+        }
+        else {
+            stmt.setNull(index, java.sql.Types.VARCHAR);
+        }
+    }
+
+    private static class AggregatedColumnStats
+    {
+        boolean containsNull;
+        boolean containsNan;
+        String minValue;
+        String maxValue;
+
+        void merge(DucklakeFileColumnStats stats)
+        {
+            if (stats.nullCount() > 0) {
+                containsNull = true;
+            }
+            if (stats.containsNan()) {
+                containsNan = true;
+            }
+            if (stats.minValue().isPresent()) {
+                String val = stats.minValue().get();
+                if (minValue == null || val.compareTo(minValue) < 0) {
+                    minValue = val;
+                }
+            }
+            if (stats.maxValue().isPresent()) {
+                String val = stats.maxValue().get();
+                if (maxValue == null || val.compareTo(maxValue) > 0) {
+                    maxValue = val;
+                }
+            }
+        }
     }
 
     private DucklakeView readView(ResultSet rs)

@@ -33,6 +33,7 @@ class TestDucklakeWriteFragment
         DucklakeWriteFragment original = new DucklakeWriteFragment(
                 "ducklake-abc123.parquet",
                 1024L,
+                200L,
                 100L,
                 List.of(
                         new DucklakeFileColumnStats(1L, 512L, 100L, 5L, Optional.of("1"), Optional.of("99"), false),
@@ -58,6 +59,7 @@ class TestDucklakeWriteFragment
                 "ducklake-empty.parquet",
                 0L,
                 0L,
+                0L,
                 List.of());
 
         String json = FRAGMENT_CODEC.toJson(original);
@@ -75,7 +77,7 @@ class TestDucklakeWriteFragment
                 42L, 1024L, 500L, 100L, Optional.empty(), Optional.empty(), true);
 
         DucklakeWriteFragment original = new DucklakeWriteFragment(
-                "ducklake-nan.parquet", 2048L, 500L, List.of(stats));
+                "ducklake-nan.parquet", 2048L, 300L, 500L, List.of(stats));
 
         String json = FRAGMENT_CODEC.toJson(original);
         DucklakeWriteFragment deserialized = FRAGMENT_CODEC.fromJson(json);

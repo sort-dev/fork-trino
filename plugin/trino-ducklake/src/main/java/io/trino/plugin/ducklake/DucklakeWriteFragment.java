@@ -23,6 +23,7 @@ import static java.util.Objects.requireNonNull;
 public record DucklakeWriteFragment(
         @JsonProperty("path") String path,
         @JsonProperty("fileSizeBytes") long fileSizeBytes,
+        @JsonProperty("footerSize") long footerSize,
         @JsonProperty("recordCount") long recordCount,
         @JsonProperty("columnStats") List<DucklakeFileColumnStats> columnStats)
 {
