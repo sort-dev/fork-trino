@@ -2,7 +2,7 @@
 
 ## Context
 
-We are implementing a Trino connector for DuckLake. During cross-engine compatibility testing (Trino writes → DuckDB reads), we encountered several issues that suggest the catalog format implicitly assumes a single-engine write model.
+We are implementing a Trino connector for DuckLake. During cross-engine compatibility testing (Trino writes -> DuckDB reads), we encountered several issues that suggest the catalog format implicitly assumes a single-engine write model.
 
 This report documents the issues found. We believe these are worth considering as DuckLake moves toward 1.0 and the spec is updated for independent implementations.
 
@@ -68,13 +68,13 @@ In `ducklake_table_column_stats` and `ducklake_file_column_stats`, the `contains
 INTERNAL Error: Calling GetValueInternal on a value that is NULL
 ```
 
-in `TransformGlobalStatsRow` → `GetGlobalTableStats`.
+in `TransformGlobalStatsRow` -> `GetGlobalTableStats`.
 
 This crash corrupts DuckDB's in-process state and causes all subsequent queries on the same connection to fail.
 
 ### Impact
 
-An independent implementation that writes `contains_nan = false` (which is logically correct — an INTEGER column does not contain NaN) will crash DuckDB.
+An independent implementation that writes `contains_nan = false` (which is logically correct -- an INTEGER column does not contain NaN) will crash DuckDB.
 
 ### Suggestion
 
@@ -91,23 +91,26 @@ The spec defines `ducklake_schema_versions` with two columns: `begin_snapshot` a
 
 Add `table_id` to the spec for `ducklake_schema_versions`.
 
-## Issue 5: SQLite catalog visibility across engines
+## Issue 5: DuckDB returns zeros for column values in Trino-written Parquet files
 
 ### Problem
 
-When one engine (Trino) writes to a SQLite catalog via JDBC and another engine (DuckDB) reads from the same catalog via its native SQLite extension, committed writes may not be visible to the reader. This appears to be a SQLite journal mode interaction — in `delete` (rollback) journal mode, connection pool idle connections from the writer may prevent the reader from seeing the latest committed state.
+When DuckDB reads Parquet files written by Trino through a DuckLake catalog, metadata operations work correctly (SHOW TABLES, DESCRIBE, row counts) but actual column values are returned as zeros/empty. DuckDB-created Parquet files read correctly through the same catalog.
 
-Opening a separate, short-lived SQLite JDBC connection between the write and the DuckDB read resolves the visibility issue, suggesting the problem is related to SQLite's file-level locking behavior rather than the catalog format itself.
+This suggests DuckDB's DuckLake extension uses Parquet-level metadata (likely `ducklake.column_id` key-value metadata) to map columns, and Trino's Parquet writer does not include this metadata.
 
 ### Impact
 
-Cross-engine access to SQLite-backed catalogs requires careful connection management. This is a practical deployment concern for any setup where multiple engines access the same catalog.
+Trino-written data is invisible at the value level to DuckDB, though catalog metadata (table discovery, schema, row counts) works correctly. This is a blocker for full bidirectional interoperability.
+
+### Status
+
+5 cross-engine tests are `@Disabled` pending resolution. Tests that verify metadata-only operations pass.
 
 ### Suggestion
 
-- Document recommended SQLite PRAGMA settings for multi-engine access (e.g., `journal_mode=WAL`)
-- Consider whether the spec should recommend WAL mode for SQLite catalogs
-- Alternatively, document that SQLite catalogs are intended for single-engine use, with PostgreSQL recommended for multi-engine deployments
+- Document what Parquet file-level or column-level metadata DuckDB expects for column mapping
+- Consider whether column mapping should be by name (Parquet schema) rather than by custom metadata, for engine independence
 
 ## Issue 6: Implicit single-writer assumption
 
@@ -126,5 +129,5 @@ As DuckLake moves toward being an open format with multiple independent implemen
 - DuckDB: 1.5.1.0 (JDBC)
 - DuckLake extension: latest as of 2026-04-06
 - Trino: development branch
-- Catalog backends tested: SQLite, PostgreSQL
+- Catalog backend: PostgreSQL (via Testcontainers)
 - All issues reproducible with the DuckDB JDBC driver

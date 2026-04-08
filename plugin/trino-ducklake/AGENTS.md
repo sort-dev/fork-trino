@@ -4,8 +4,6 @@
 - Preferred command form: `cd plugin/trino-ducklake` then run `../../mvnw ...`.
 - Use `-Dair.check.skip-all` during iterative test/debug runs to skip expensive validation plugins.
 - Fast-loop example: `../../mvnw -Dair.check.skip-all -Dtest=TestDucklakeIntegration test`.
-- `ducklake.test.catalog-backend` accepted values: `postgresql` (default), `sqlite`, `duckdb`.
-- SQLite example: `../../mvnw -Dair.check.skip-all -Dducklake.test.catalog-backend=sqlite -Dtest=TestDucklakeIntegration test`.
-- PostgreSQL requires Docker (Testcontainers). SQLite and DuckDB run without Docker.
+- All tests use PostgreSQL via Testcontainers (requires Docker).
 - `ReportLeakedContainers` is disabled by default in this module's test runs to avoid Podman compatibility warning noise.
 - Re-enable leaked-container checks with `-DReportLeakedContainers.disabled=false` when needed.

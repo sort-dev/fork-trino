@@ -15,61 +15,43 @@ package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableMap;
 
-import java.nio.file.Path;
 import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
+/**
+ * Manages the shared PostgreSQL test catalog environment.
+ * Provides a singleton PostgreSQL Testcontainer and generates the shared
+ * test catalog on first use.
+ */
 public final class DucklakeTestCatalogEnvironment
 {
     private static final Object LOCK = new Object();
 
-    private static volatile TestingDucklakePostgreSqlCatalogServer postgreSqlServer;
-    private static volatile RuntimeException postgreSqlBackendUnavailable;
-
-    private static volatile boolean sqliteCatalogGenerated;
-    private static volatile boolean postgreSqlCatalogGenerated;
-    private static volatile boolean duckDbCatalogGenerated;
+    private static volatile TestingDucklakePostgreSqlCatalogServer server;
+    private static volatile RuntimeException serverUnavailable;
+    private static volatile boolean catalogGenerated;
 
     private DucklakeTestCatalogEnvironment() {}
 
-    public static Path ensureSqliteCatalog()
+    public static TestingDucklakePostgreSqlCatalogServer getServer()
             throws Exception
     {
-        ensureSqliteCatalogGenerated();
-        return DucklakeCatalogGenerator.getSqliteCatalogPath();
+        return ensureServer();
     }
 
     public static DucklakeConfig createDucklakeConfig()
             throws Exception
     {
-        DucklakeTestCatalogBackend backend = DucklakeTestCatalogBackend.current();
+        TestingDucklakePostgreSqlCatalogServer pgServer = ensureServer();
+        ensureCatalogGenerated(pgServer);
 
-        DucklakeConfig config = new DucklakeConfig()
-                .setMaxCatalogConnections(5);
-
-        switch (backend) {
-            case SQLITE -> {
-                Path sqliteCatalogPath = ensureSqliteCatalog();
-                config.setCatalogDatabaseUrl("jdbc:sqlite:" + sqliteCatalogPath.toAbsolutePath());
-                config.setDataPath(DucklakeCatalogGenerator.getSqliteCatalogDirectory().resolve("data").toAbsolutePath().toString());
-            }
-            case POSTGRESQL -> {
-                TestingDucklakePostgreSqlCatalogServer server = getPostgreSqlServer();
-                ensurePostgreSqlCatalogGenerated(server);
-                config.setCatalogDatabaseUrl(server.getJdbcUrl());
-                config.setCatalogDatabaseUser(server.getUser());
-                config.setCatalogDatabasePassword(server.getPassword());
-                config.setDataPath(DucklakeCatalogGenerator.getPostgreSqlCatalogDirectory().resolve("data").toAbsolutePath().toString());
-            }
-            case DUCKDB -> {
-                Path duckDbCatalogPath = ensureDuckDbCatalog();
-                config.setCatalogDatabaseUrl("jdbc:duckdb:" + duckDbCatalogPath.toAbsolutePath());
-                config.setDataPath(DucklakeCatalogGenerator.getDuckDbCatalogDirectory().resolve("data").toAbsolutePath().toString());
-            }
-        }
-
-        return config;
+        return new DucklakeConfig()
+                .setMaxCatalogConnections(5)
+                .setCatalogDatabaseUrl(pgServer.getJdbcUrl())
+                .setCatalogDatabaseUser(pgServer.getUser())
+                .setCatalogDatabasePassword(pgServer.getPassword())
+                .setDataPath(DucklakeCatalogGenerator.getPostgreSqlCatalogDirectory().resolve("data").toAbsolutePath().toString());
     }
 
     public static Map<String, String> getConnectorProperties()
@@ -90,83 +72,51 @@ public final class DucklakeTestCatalogEnvironment
         return properties.buildOrThrow();
     }
 
-    public static DucklakeTestCatalogBackend currentBackend()
-    {
-        return DucklakeTestCatalogBackend.current();
-    }
-
-    private static void ensureSqliteCatalogGenerated()
+    private static TestingDucklakePostgreSqlCatalogServer ensureServer()
             throws Exception
     {
-        if (!sqliteCatalogGenerated) {
-            synchronized (LOCK) {
-                if (!sqliteCatalogGenerated) {
-                    DucklakeCatalogGenerator.generateSqliteCatalog();
-                    sqliteCatalogGenerated = true;
-                }
-            }
-        }
-    }
-
-    private static Path ensureDuckDbCatalog()
-            throws Exception
-    {
-        if (!duckDbCatalogGenerated) {
-            synchronized (LOCK) {
-                if (!duckDbCatalogGenerated) {
-                    DucklakeCatalogGenerator.generateDuckDbCatalog(DucklakeCatalogGenerator.getDuckDbCatalogPath());
-                    duckDbCatalogGenerated = true;
-                }
-            }
-        }
-        return DucklakeCatalogGenerator.getDuckDbCatalogPath();
-    }
-
-    private static void ensurePostgreSqlCatalogGenerated(TestingDucklakePostgreSqlCatalogServer server)
-            throws Exception
-    {
-        if (!postgreSqlCatalogGenerated) {
-            synchronized (LOCK) {
-                if (!postgreSqlCatalogGenerated) {
-                    DucklakeCatalogGenerator.generatePostgreSqlCatalog(server);
-                    postgreSqlCatalogGenerated = true;
-                }
-            }
-        }
-    }
-
-    private static TestingDucklakePostgreSqlCatalogServer getPostgreSqlServer()
-            throws Exception
-    {
-        RuntimeException backendUnavailable = postgreSqlBackendUnavailable;
-        if (backendUnavailable != null) {
-            skipPostgreSqlTests(backendUnavailable);
+        RuntimeException unavailable = serverUnavailable;
+        if (unavailable != null) {
+            skipTests(unavailable);
         }
 
-        TestingDucklakePostgreSqlCatalogServer server = postgreSqlServer;
-        if (server == null) {
+        TestingDucklakePostgreSqlCatalogServer result = server;
+        if (result == null) {
             synchronized (LOCK) {
-                server = postgreSqlServer;
-                if (server == null) {
+                result = server;
+                if (result == null) {
                     try {
-                        server = new TestingDucklakePostgreSqlCatalogServer();
-                        postgreSqlServer = server;
-                        Runtime.getRuntime().addShutdownHook(new Thread(server::close));
+                        result = new TestingDucklakePostgreSqlCatalogServer();
+                        server = result;
+                        Runtime.getRuntime().addShutdownHook(new Thread(result::close));
                     }
                     catch (RuntimeException e) {
                         if (isDockerUnavailable(e)) {
-                            postgreSqlBackendUnavailable = e;
-                            skipPostgreSqlTests(e);
+                            serverUnavailable = e;
+                            skipTests(e);
                         }
                         throw e;
                     }
                 }
             }
         }
-        return server;
+        return result;
     }
 
-    private static boolean isDockerUnavailable(Throwable throwable)
+    private static void ensureCatalogGenerated(TestingDucklakePostgreSqlCatalogServer pgServer)
+            throws Exception
+    {
+        if (!catalogGenerated) {
+            synchronized (LOCK) {
+                if (!catalogGenerated) {
+                    DucklakeCatalogGenerator.generatePostgreSqlCatalog(pgServer);
+                    catalogGenerated = true;
+                }
+            }
+        }
+    }
+
+    static boolean isDockerUnavailable(Throwable throwable)
     {
         Throwable current = throwable;
         while (current != null) {
@@ -180,10 +130,10 @@ public final class DucklakeTestCatalogEnvironment
         return false;
     }
 
-    private static void skipPostgreSqlTests(Throwable cause)
+    private static void skipTests(Throwable cause)
     {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 false,
-                () -> "PostgreSQL Ducklake tests require a working Docker environment: " + cause.getMessage());
+                () -> "Ducklake tests require a working Docker environment for PostgreSQL: " + cause.getMessage());
     }
 }

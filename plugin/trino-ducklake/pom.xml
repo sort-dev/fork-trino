@@ -233,14 +233,6 @@
             <artifactId>testcontainers-postgresql</artifactId>
             <scope>test</scope>
         </dependency>
-
-        <!-- SQLite JDBC for test catalog -->
-        <dependency>
-            <groupId>org.xerial</groupId>
-            <artifactId>sqlite-jdbc</artifactId>
-            <version>3.47.2.0</version>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 
     <build>

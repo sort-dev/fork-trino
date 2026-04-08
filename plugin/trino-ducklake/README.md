@@ -2,7 +2,7 @@
 
 Trino connector for the [Ducklake](https://ducklake.select/) table format.
 
-Reads Ducklake metadata from a JDBC catalog database (SQLite or PostgreSQL) and data from Parquet files via Trino's native Parquet reader. Supports data inlined in the metadata catalog (DuckLake's default for small tables).
+Reads Ducklake metadata from a PostgreSQL catalog database (via JDBC) and data from Parquet files via Trino's native Parquet reader. Supports data inlined in the metadata catalog (DuckLake's default for small tables).
 
 ## Current Capability Snapshot
 
@@ -27,15 +27,6 @@ Not yet supported:
 ## Configuration
 
 Example `etc/catalog/ducklake.properties`:
-
-```properties
-connector.name=ducklake
-ducklake.catalog.database-url=jdbc:sqlite:/path/to/catalog.db
-ducklake.data-path=/path/to/data
-ducklake.catalog.max-connections=10
-```
-
-PostgreSQL catalog configuration:
 
 ```properties
 connector.name=ducklake
@@ -152,9 +143,7 @@ mvn test
 ```
 
 Notes:
-- **Default test backend is PostgreSQL** (uses Testcontainers, requires Docker).
-- Override with `-Dducklake.test.catalog-backend=sqlite` or `duckdb`.
-- `TestDucklakeDeleteFileHandling` is SQLite-only (it mutates SQLite catalog files directly) and auto-skips on other backends.
+- **All tests require PostgreSQL** (uses Testcontainers, requires Docker).
 - Current local workflow is module-scoped: run from `plugin/trino-ducklake` using `../../mvnw ...`.
 - This module disables `ReportLeakedContainers` by default during tests to avoid Podman Docker API compatibility noise
   (`unknown container state: restarting`).
@@ -171,15 +160,12 @@ cd plugin/trino-ducklake
 Targeted runs:
 
 ```bash
-# Full integration tests (PostgreSQL by default)
+# Full integration tests
 mvn test -Dtest=TestDucklakeIntegration
 
 # Write integration tests
 mvn test -Dtest=TestDucklakeWriteIntegration
 
-# SQLite backend
-mvn test -Dducklake.test.catalog-backend=sqlite -Dtest=TestDucklakeIntegration
-
-# DuckDB backend
-mvn test -Dducklake.test.catalog-backend=duckdb -Dtest=TestDucklakeIntegration
+# Cross-engine compatibility tests
+mvn test -Dtest=TestDucklakeCrossEngineCompatibility
 ```

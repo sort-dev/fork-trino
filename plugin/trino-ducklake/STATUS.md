@@ -7,7 +7,7 @@ Last updated: 2026-04-07
 The read path is fully implemented and tested.
 
 ### Data Access
-- Catalog reads from Ducklake SQL metadata tables (JDBC/HikariCP, validated with SQLite and PostgreSQL backends).
+- Catalog reads from Ducklake SQL metadata tables (JDBC/HikariCP, PostgreSQL backend).
 - Snapshot-scoped reads for current snapshot and table-version queries (`FOR VERSION AS OF`, `FOR TIMESTAMP AS OF`), with optional session/catalog pinning.
 - Parquet data files read through Trino's native Parquet reader.
 - Inlined data read directly from the metadata catalog (DuckLake's default for tables with <=10 rows).
@@ -30,14 +30,11 @@ The read path is fully implemented and tested.
   These types are readable but lack type-specific operators and functions.
 
 ### Test Coverage
-- 220 tests, 0 failures (1 skipped SQLite-only test) across 9 test classes.
-- `TestDucklakeIntegration`: 142 end-to-end SQL tests via `DucklakeQueryRunner`.
+- 353 tests, 0 failures, 12 skipped across test classes.
+- `TestDucklakeIntegration`: 145 end-to-end SQL tests via `DucklakeQueryRunner`.
 - 15 test tables covering primitives, arrays, structs, maps, partitioning (identity/temporal/daily), schema evolution, NULLs, empty tables, delete files, multi-file scans, complex NULL patterns, and inlined data.
 - Unit tests for catalog, split manager, partition pruning, page source provider, delete file handling, plugin wiring.
-- Test backend matrix:
-  - Default: SQLite (`mvn test`)
-  - PostgreSQL: `mvn test -Dducklake.test.catalog-backend=postgresql` (uses Testcontainers, requires Docker)
-  - `TestDucklakeDeleteFileHandling` is SQLite-only because it edits SQLite catalog files directly.
+- All tests use PostgreSQL backend via Testcontainers (requires Docker).
 
 ## Known Gaps and Concerns
 
@@ -62,7 +59,7 @@ Stale inlined metadata pointers remain non-fatal. If metadata references an inli
 `json`, `variant`, and geometry types are stored as VARCHAR/VARBINARY. No type-specific functions or operators. Variant shredding is not implemented.
 
 ### Catalog backend
-Catalog implementation now routes by JDBC URL (`jdbc:sqlite:` / `jdbc:postgresql:`) with a shared JDBC code path. SQLite and PostgreSQL are both covered by tests. DuckDB-as-catalog-backend remains unverified.
+PostgreSQL is the only supported catalog backend. The connector uses `JdbcDucklakeCatalog` with a generic JDBC code path that is compatible with any JDBC-compliant database, but testing and configuration are PostgreSQL-focused.
 
 ## Write Side — Data Writes Implemented
 
@@ -98,6 +95,10 @@ Catalog metadata format has been aligned with DuckDB's implementation for intero
 - Footer size, schema_versions.table_id, and UUID type handling are all DuckDB-compatible
 - See [REPORT_CROSS_ENGINE_WRITE.md](REPORT_CROSS_ENGINE_WRITE.md) for open issues filed with the DuckDB team
 
+Cross-engine validation (Trino writes -> DuckDB reads, PostgreSQL catalog):
+- Catalog metadata operations work: SHOW TABLES, DESCRIBE, row counts all correct
+- Column value reads have a known interop issue: DuckDB returns zeros for column values in Trino-written Parquet files (likely missing `ducklake.column_id` Parquet metadata that DuckDB uses for column mapping)
+
 ### Not yet implemented
 
 - Partitioned data writes (partition value computation + `ducklake_file_partition_value` rows)
@@ -108,9 +109,8 @@ Catalog metadata format has been aligned with DuckDB's implementation for intero
 
 ### Test coverage
 
-- Default test backend: **PostgreSQL** (via Testcontainers, requires Docker)
-- Override with `-Dducklake.test.catalog-backend=sqlite` or `duckdb`
+- All tests use **PostgreSQL** backend (via Testcontainers, requires Docker)
 - DDL: `TestDucklakeDDLIntegration` (12 tests)
 - Data writes: `TestDucklakeWriteIntegration` (19 tests), `TestDucklakeWriteFragment`, `TestDucklakeStatsExtractor`
-- Cross-engine: `TestDucklakeCrossEngineCompatibility` (partial — DuckDB crash fixed, SQLite visibility issue remains for data reads)
-- All tests pass on PostgreSQL, SQLite, and DuckDB backends (192+ tests each)
+- Cross-engine: `TestDucklakeCrossEngineCompatibility` (10 tests, 5 disabled pending Parquet column mapping fix)
+- All 353 tests pass (12 skipped)

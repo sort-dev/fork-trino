@@ -16,11 +16,15 @@ package io.trino.plugin.ducklake;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
+
 public class TestingDucklakePostgreSqlCatalogServer
         implements AutoCloseable
 {
     private static final String IMAGE = "postgres:18";
-    private static final String DATABASE = "ducklake";
+    private static final String DEFAULT_DATABASE = "ducklake";
     private static final String USER = "test";
     private static final String PASSWORD = "test";
 
@@ -29,7 +33,7 @@ public class TestingDucklakePostgreSqlCatalogServer
     public TestingDucklakePostgreSqlCatalogServer()
     {
         container = new PostgreSQLContainer(DockerImageName.parse(IMAGE))
-                .withDatabaseName(DATABASE)
+                .withDatabaseName(DEFAULT_DATABASE)
                 .withUsername(USER)
                 .withPassword(PASSWORD)
                 .withStartupAttempts(3);
@@ -39,6 +43,13 @@ public class TestingDucklakePostgreSqlCatalogServer
     public String getJdbcUrl()
     {
         return container.getJdbcUrl();
+    }
+
+    public String getJdbcUrl(String databaseName)
+    {
+        // Testcontainers JDBC URL format: jdbc:postgresql://host:port/database
+        // Replace the default database name with the requested one
+        return container.getJdbcUrl().replace("/" + DEFAULT_DATABASE, "/" + databaseName);
     }
 
     public String getUser()
@@ -53,11 +64,29 @@ public class TestingDucklakePostgreSqlCatalogServer
 
     public String getDuckDbAttachUri()
     {
-        return "ducklake:postgres:dbname=" + DATABASE +
+        return getDuckDbAttachUri(DEFAULT_DATABASE);
+    }
+
+    public String getDuckDbAttachUri(String databaseName)
+    {
+        return "ducklake:postgres:dbname=" + databaseName +
                 " host=" + container.getHost() +
                 " port=" + container.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT) +
                 " user=" + USER +
                 " password=" + PASSWORD;
+    }
+
+    /**
+     * Creates a new database in the PostgreSQL container.
+     * Used for test isolation — each test class gets its own database.
+     */
+    public void createDatabase(String databaseName)
+            throws Exception
+    {
+        try (Connection conn = DriverManager.getConnection(getJdbcUrl(), USER, PASSWORD);
+                Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE DATABASE " + databaseName);
+        }
     }
 
     @Override

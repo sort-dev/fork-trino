@@ -18,7 +18,6 @@ import io.airlift.log.Logger;
 import io.airlift.log.Logging;
 import io.trino.testing.DistributedQueryRunner;
 
-import java.nio.file.Path;
 import java.util.Map;
 
 import static io.airlift.testing.Closeables.closeAllSuppress;
@@ -56,8 +55,8 @@ public final class DucklakeQueryRunner
         }
 
         /**
-         * Use an isolated catalog (fresh SQLite DB) instead of the shared test catalog.
-         * Each isolated catalog gets its own SQLite file and data directory,
+         * Use an isolated catalog (fresh PostgreSQL database) instead of the shared test catalog.
+         * Each isolated catalog gets its own database in the shared PostgreSQL container,
          * preventing cross-test interference from write operations.
          */
         public Builder useIsolatedCatalog(String testName)
@@ -74,11 +73,14 @@ public final class DucklakeQueryRunner
             try {
                 Map<String, String> baseProperties;
                 if (isolatedCatalogName != null) {
-                    Path catalogPath = DucklakeCatalogGenerator.generateIsolatedSqliteCatalog(isolatedCatalogName);
-                    Path dataDir = catalogPath.getParent().resolve("data");
+                    TestingDucklakePostgreSqlCatalogServer server = DucklakeTestCatalogEnvironment.getServer();
+                    DucklakeCatalogGenerator.IsolatedCatalog isolated =
+                            DucklakeCatalogGenerator.generateIsolatedPostgreSqlCatalog(server, isolatedCatalogName);
                     baseProperties = ImmutableMap.of(
-                            "ducklake.catalog.database-url", "jdbc:sqlite:" + catalogPath.toAbsolutePath(),
-                            "ducklake.data-path", dataDir.toAbsolutePath().toString());
+                            "ducklake.catalog.database-url", isolated.jdbcUrl(),
+                            "ducklake.catalog.database-user", isolated.user(),
+                            "ducklake.catalog.database-password", isolated.password(),
+                            "ducklake.data-path", isolated.dataDir().toAbsolutePath().toString());
                 }
                 else {
                     baseProperties = DucklakeTestCatalogEnvironment.getConnectorProperties();

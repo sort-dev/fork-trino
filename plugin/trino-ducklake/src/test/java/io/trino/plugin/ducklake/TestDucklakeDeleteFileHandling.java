@@ -20,16 +20,14 @@ import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
 import io.trino.plugin.ducklake.catalog.DucklakeSchema;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
-import io.trino.plugin.ducklake.catalog.SqliteDucklakeCatalog;
+import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -47,38 +45,22 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDucklakeDeleteFileHandling
 {
-    private static Path sourceCatalogPath;
-
-    @BeforeAll
-    public static void setUpClass()
-            throws Exception
-    {
-        if (DucklakeTestCatalogEnvironment.currentBackend() == DucklakeTestCatalogBackend.SQLITE) {
-            sourceCatalogPath = DucklakeTestCatalogEnvironment.ensureSqliteCatalog();
-        }
-    }
-
     @Test
     public void testDeleteFileSuppressesRows()
             throws Exception
     {
-        // This test edits SQLite catalog files directly — skip for other backends
-        if (DucklakeTestCatalogBackend.current() != DucklakeTestCatalogBackend.SQLITE) {
-            return;
-        }
+        TestingDucklakePostgreSqlCatalogServer server = DucklakeTestCatalogEnvironment.getServer();
+        DucklakeCatalogGenerator.IsolatedCatalog isolated =
+                DucklakeCatalogGenerator.generateIsolatedPostgreSqlCatalog(server, "delete-file-" + UUID.randomUUID().toString().substring(0, 8));
 
-        Path isolatedCatalogDir = Path.of("target/test-catalog-delete-" + UUID.randomUUID());
-        copyDirectory(sourceCatalogPath.getParent(), isolatedCatalogDir);
-        Path isolatedCatalogPath = isolatedCatalogDir.resolve("catalog.db");
-        Path dataRoot = isolatedCatalogDir.resolve("data");
-        updateCatalogDataPath(isolatedCatalogPath, dataRoot);
+        DucklakeConfig config = new DucklakeConfig()
+                .setCatalogDatabaseUrl(isolated.jdbcUrl())
+                .setCatalogDatabaseUser(isolated.user())
+                .setCatalogDatabasePassword(isolated.password())
+                .setDataPath(isolated.dataDir().toAbsolutePath().toString())
+                .setMaxCatalogConnections(5);
 
-        DucklakeConfig config = new DucklakeConfig();
-        config.setCatalogDatabaseUrl("jdbc:sqlite:" + isolatedCatalogPath.toAbsolutePath());
-        config.setDataPath(dataRoot.toAbsolutePath().toString());
-        config.setMaxCatalogConnections(5);
-
-        DucklakeCatalog catalog = new SqliteDucklakeCatalog(config);
+        DucklakeCatalog catalog = new JdbcDucklakeCatalog(config);
         try {
             DucklakeSplitManager splitManager = new DucklakeSplitManager(catalog, config, new DucklakePathResolver(catalog, config));
             DucklakePageSourceProvider pageSourceProvider = new DucklakePageSourceProvider(
@@ -100,7 +82,9 @@ public class TestDucklakeDeleteFileHandling
             DucklakeDataFile dataFile = findDataFileForSplit(catalog, table.tableId(), snapshotId, splitBeforeDelete);
             DeleteFilePath deleteFilePath = writeDeleteParquetFile(splitBeforeDelete.dataFilePath(), dataFile.rowIdStart());
             insertDeleteFileMetadata(
-                    isolatedCatalogPath,
+                    isolated.jdbcUrl(),
+                    isolated.user(),
+                    isolated.password(),
                     table.tableId(),
                     snapshotId,
                     dataFile.dataFileId(),
@@ -119,7 +103,6 @@ public class TestDucklakeDeleteFileHandling
         }
         finally {
             catalog.close();
-            deleteDirectory(isolatedCatalogDir);
         }
     }
 
@@ -200,7 +183,9 @@ public class TestDucklakeDeleteFileHandling
     }
 
     private static void insertDeleteFileMetadata(
-            Path catalogPath,
+            String jdbcUrl,
+            String user,
+            String password,
             long tableId,
             long snapshotId,
             long dataFileId,
@@ -209,7 +194,7 @@ public class TestDucklakeDeleteFileHandling
             long fileSizeBytes)
             throws Exception
     {
-        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + catalogPath.toAbsolutePath())) {
+        try (Connection conn = DriverManager.getConnection(jdbcUrl, user, password)) {
             long nextDeleteFileId;
             try (Statement statement = conn.createStatement();
                     ResultSet rs = statement.executeQuery("SELECT COALESCE(MAX(delete_file_id), 0) + 1 FROM ducklake_delete_file")) {
@@ -237,56 +222,9 @@ public class TestDucklakeDeleteFileHandling
         }
     }
 
-    private static void updateCatalogDataPath(Path catalogPath, Path dataRoot)
-            throws Exception
-    {
-        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + catalogPath.toAbsolutePath());
-                PreparedStatement statement = conn.prepareStatement("UPDATE ducklake_metadata SET value = ? WHERE key = 'data_path'")) {
-            statement.setString(1, dataRoot.toAbsolutePath().toString());
-            statement.executeUpdate();
-        }
-    }
-
     private static String escapeSql(String value)
     {
         return value.replace("'", "''");
-    }
-
-    private static void copyDirectory(Path source, Path target)
-            throws Exception
-    {
-        Files.walk(source).forEach(path -> {
-            try {
-                Path destination = target.resolve(source.relativize(path).toString());
-                if (Files.isDirectory(path)) {
-                    Files.createDirectories(destination);
-                }
-                else {
-                    Files.createDirectories(destination.getParent());
-                    Files.copy(path, destination);
-                }
-            }
-            catch (Exception e) {
-                throw new RuntimeException("Failed to copy " + path + " to " + target, e);
-            }
-        });
-    }
-
-    private static void deleteDirectory(Path directory)
-            throws Exception
-    {
-        if (Files.exists(directory)) {
-            Files.walk(directory)
-                    .sorted((left, right) -> -left.compareTo(right))
-                    .forEach(path -> {
-                        try {
-                            Files.delete(path);
-                        }
-                        catch (Exception e) {
-                            throw new RuntimeException("Failed to delete: " + path, e);
-                        }
-                    });
-        }
     }
 
     private static DucklakeSchema getSchema(DucklakeCatalog catalog, String schemaName, long snapshotId)

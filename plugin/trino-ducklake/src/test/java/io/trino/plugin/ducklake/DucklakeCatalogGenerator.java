@@ -19,82 +19,28 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Utility to generate a test Ducklake catalog using DuckDB's embedded JDBC driver.
- * This creates backend-specific Ducklake catalog metadata and Parquet data files
+ * Creates PostgreSQL-backed Ducklake catalog metadata and Parquet data files
  * by writing through DuckDB + Ducklake extension.
  */
 public final class DucklakeCatalogGenerator
 {
     private static final Path TARGET_DIR = Path.of("target");
-    private static final Path SQLITE_CATALOG_DIR = TARGET_DIR.resolve("test-catalog-sqlite");
     private static final Path POSTGRESQL_CATALOG_DIR = TARGET_DIR.resolve("test-catalog-postgresql");
-    private static final Path DUCKDB_CATALOG_DIR = TARGET_DIR.resolve("test-catalog-duckdb");
-    private static final Path TEMP_DB = TARGET_DIR.resolve("temp-setup.duckdb");
 
     private DucklakeCatalogGenerator() {}
-
-    public static void main(String[] args)
-            throws Exception
-    {
-        String backend = System.getProperty("ducklake.test.catalog-backend", "sqlite");
-        switch (backend.trim().toLowerCase(java.util.Locale.ENGLISH)) {
-            case "sqlite" -> generateSqliteCatalog();
-            case "duckdb" -> generateDuckDbCatalog(DUCKDB_CATALOG_DIR.resolve("catalog.ducklake"));
-            default -> throw new IllegalArgumentException("Unsupported standalone generator backend: " + backend + ". Supported: sqlite, duckdb");
-        }
-    }
-
-    public static Path getSqliteCatalogDirectory()
-    {
-        return SQLITE_CATALOG_DIR;
-    }
 
     public static Path getPostgreSqlCatalogDirectory()
     {
         return POSTGRESQL_CATALOG_DIR;
     }
 
-    public static Path getDuckDbCatalogDirectory()
-    {
-        return DUCKDB_CATALOG_DIR;
-    }
-
-    public static Path getSqliteCatalogPath()
-    {
-        return SQLITE_CATALOG_DIR.resolve("catalog.db");
-    }
-
-    public static Path getDuckDbCatalogPath()
-    {
-        return DUCKDB_CATALOG_DIR.resolve("catalog.ducklake");
-    }
-
-    public static void generateSqliteCatalog()
-            throws Exception
-    {
-        Path catalogPath = getSqliteCatalogPath().toAbsolutePath();
-        generateTestCatalog(
-                "sqlite",
-                SQLITE_CATALOG_DIR,
-                "ducklake:sqlite:" + catalogPath,
-                List.of("sqlite"),
-                "catalog database: " + catalogPath);
-    }
-
-    public static void generateDuckDbCatalog(Path catalogPath)
-            throws Exception
-    {
-        Path absoluteCatalogPath = catalogPath.toAbsolutePath();
-        generateTestCatalog(
-                "duckdb",
-                DUCKDB_CATALOG_DIR,
-                "ducklake:" + absoluteCatalogPath,
-                List.of(),
-                "catalog database: " + absoluteCatalogPath);
-    }
-
+    /**
+     * Generate the shared PostgreSQL test catalog with all standard test tables and views.
+     */
     public static void generatePostgreSqlCatalog(TestingDucklakePostgreSqlCatalogServer server)
             throws Exception
     {
@@ -107,23 +53,41 @@ public final class DucklakeCatalogGenerator
     }
 
     /**
-     * Generate an isolated SQLite-based test catalog at the given directory.
-     * Each call creates a fresh catalog with all test tables and views.
+     * Generate an isolated PostgreSQL test catalog in a unique database.
+     * Each call creates a new database in the shared container, generates all test tables/views,
+     * and returns a map with JDBC URL + data directory for the new catalog.
      * Use this for write tests that need their own catalog to avoid cross-test interference.
      */
-    public static Path generateIsolatedSqliteCatalog(String testName)
+    public static IsolatedCatalog generateIsolatedPostgreSqlCatalog(
+            TestingDucklakePostgreSqlCatalogServer server,
+            String testName)
             throws Exception
     {
+        String databaseName = "ducklake_" + testName.replace('-', '_');
+        server.createDatabase(databaseName);
+
         Path catalogDir = TARGET_DIR.resolve("test-catalog-isolated-" + testName);
-        Path catalogPath = catalogDir.resolve("catalog.db");
         generateTestCatalog(
-                "sqlite",
+                "postgresql",
                 catalogDir,
-                "ducklake:sqlite:" + catalogPath.toAbsolutePath(),
-                List.of("sqlite"),
+                server.getDuckDbAttachUri(databaseName),
+                List.of("postgres"),
                 "isolated catalog for " + testName);
-        return catalogPath;
+
+        return new IsolatedCatalog(
+                server.getJdbcUrl(databaseName),
+                server.getUser(),
+                server.getPassword(),
+                catalogDir.resolve("data"),
+                server.getDuckDbAttachUri(databaseName));
     }
+
+    public record IsolatedCatalog(
+            String jdbcUrl,
+            String user,
+            String password,
+            Path dataDir,
+            String duckDbAttachUri) {}
 
     static void generateTestCatalog(
             String backendName,
@@ -142,14 +106,11 @@ public final class DucklakeCatalogGenerator
         // Create target directory
         Files.createDirectories(TARGET_DIR);
 
-        // Remove old catalog if exists
+        // Remove old catalog data if exists
         if (Files.exists(catalogDirectory)) {
-            System.out.println("Removing existing test catalog...");
+            System.out.println("Removing existing test catalog data...");
             deleteDirectory(catalogDirectory);
         }
-
-        // Remove old temp DB if exists
-        Files.deleteIfExists(TEMP_DB);
 
         System.out.println("Creating test catalog with DuckDB 1.5 + Ducklake extension...");
         System.out.println();
@@ -238,11 +199,9 @@ public final class DucklakeCatalogGenerator
                     )
                     """);
 
-            // Set partition by region using ALTER (CREATE TABLE ... PARTITION BY not yet supported)
             System.out.println("Setting partition by region...");
             stmt.execute("ALTER TABLE ducklake_db.test_schema.partitioned_table SET PARTITIONED BY (region)");
 
-            // Insert data per region in separate statements so DuckDB writes separate files
             System.out.println("Inserting partitioned data...");
             stmt.execute("""
                     INSERT INTO ducklake_db.test_schema.partitioned_table VALUES
@@ -270,11 +229,9 @@ public final class DucklakeCatalogGenerator
                     )
                     """);
 
-            // Partition by year(event_date) and month(event_date)
             System.out.println("Setting temporal partition by year(event_date), month(event_date)...");
             stmt.execute("ALTER TABLE ducklake_db.test_schema.temporal_partitioned_table SET PARTITIONED BY (year(event_date), month(event_date))");
 
-            // Insert data across different years/months so DuckDB writes separate files per partition
             System.out.println("Inserting temporally partitioned data...");
             stmt.execute("""
                     INSERT INTO ducklake_db.test_schema.temporal_partitioned_table VALUES
@@ -325,7 +282,7 @@ public final class DucklakeCatalogGenerator
                         (5, 'New year event', '2024-01-10', 50.0)
                     """);
 
-            // Table 18: Partitioned by day on a TIMESTAMPTZ column (matches real-world ingest patterns)
+            // Table 18: Partitioned by day on a TIMESTAMPTZ column
             System.out.println("Creating timestamp_partitioned_table (TIMESTAMPTZ partitioned by day)...");
             stmt.execute("""
                     CREATE TABLE ducklake_db.test_schema.timestamp_partitioned_table (
@@ -340,19 +297,16 @@ public final class DucklakeCatalogGenerator
             stmt.execute("ALTER TABLE ducklake_db.test_schema.timestamp_partitioned_table SET PARTITIONED BY (year(inserted_at), month(inserted_at), day(inserted_at))");
 
             System.out.println("Inserting timestamp partitioned data...");
-            // File 1: March 7, 2026
             stmt.execute("""
                     INSERT INTO ducklake_db.test_schema.timestamp_partitioned_table VALUES
                         (1, 'Morning event', '2026-03-07 08:00:00+00', 100.0),
                         (2, 'Afternoon event', '2026-03-07 14:30:00+00', 150.0)
                     """);
-            // File 2: March 8, 2026
             stmt.execute("""
                     INSERT INTO ducklake_db.test_schema.timestamp_partitioned_table VALUES
                         (3, 'Next day event', '2026-03-08 09:00:00+00', 200.0),
                         (4, 'Next day late', '2026-03-08 22:00:00+00', 250.0)
                     """);
-            // File 3: June 15, 2026
             stmt.execute("""
                     INSERT INTO ducklake_db.test_schema.timestamp_partitioned_table VALUES
                         (5, 'Summer event', '2026-06-15 10:00:00+00', 300.0)
@@ -454,7 +408,6 @@ public final class DucklakeCatalogGenerator
                     """);
 
             // Table 10: Schema evolution table
-            // Create with original columns, insert data, then add a column and insert more
             System.out.println("Creating schema_evolution_table...");
             stmt.execute("""
                     CREATE TABLE ducklake_db.test_schema.schema_evolution_table (
@@ -469,10 +422,8 @@ public final class DucklakeCatalogGenerator
                         (2, 'row2')
                     """);
 
-            // Force a checkpoint so the first batch is in its own Parquet file
             stmt.execute("CHECKPOINT ducklake_db");
 
-            // Now add a new column and insert more data
             System.out.println("Adding column to schema_evolution_table...");
             stmt.execute("ALTER TABLE ducklake_db.test_schema.schema_evolution_table ADD COLUMN added_col INTEGER");
 
@@ -507,7 +458,7 @@ public final class DucklakeCatalogGenerator
             }
             stmt.execute(insertSql.toString());
 
-            // Table 12: Table with deleted rows (tests delete file / merge-on-read handling)
+            // Table 12: Table with deleted rows
             System.out.println("Creating deleted_rows_table...");
             stmt.execute("""
                     CREATE TABLE ducklake_db.test_schema.deleted_rows_table (
@@ -527,7 +478,6 @@ public final class DucklakeCatalogGenerator
                         (6, 'delete', 60.0)
                     """);
 
-            // Flush before delete so data is in Parquet files
             stmt.execute("CALL ducklake_flush_inlined_data('ducklake_db')");
             System.out.println("Deleting rows from deleted_rows_table...");
             stmt.execute("DELETE FROM ducklake_db.test_schema.deleted_rows_table WHERE name = 'delete'");
@@ -560,7 +510,6 @@ public final class DucklakeCatalogGenerator
                     )
                     """);
 
-            // Disable inlining so each INSERT creates a separate Parquet file
             stmt.execute("CALL ducklake_db.set_option('data_inlining_row_limit', 0, schema => 'test_schema', table_name => 'multi_file_table')");
 
             stmt.execute("""
@@ -578,21 +527,17 @@ public final class DucklakeCatalogGenerator
                         (5, 'file3_row1')
                     """);
 
-            // Force checkpoint to write data to Parquet files
             System.out.println("Forcing checkpoint to write Parquet files...");
             stmt.execute("CHECKPOINT ducklake_db");
 
-            // Detach Ducklake catalog (commits everything to SQLite)
             System.out.println("Detaching Ducklake catalog...");
             stmt.execute("DETACH ducklake_db");
 
             // Re-attach to create inlined tables AFTER checkpoint/detach.
-            // CHECKPOINT and DETACH flush inlined data to Parquet, so inlined tables
-            // must be created in a separate attach cycle with no checkpoint before detach.
             System.out.println("Re-attaching catalog for inlined table creation...");
             stmt.execute(attachSql);
 
-            // Table 15: Inlined data table (data stays in SQLite, not flushed to Parquet)
+            // Table 15: Inlined data table
             System.out.println("Creating inlined_table (data stays inlined in metadata catalog)...");
             stmt.execute("""
                     CREATE TABLE ducklake_db.test_schema.inlined_table (
@@ -609,7 +554,7 @@ public final class DucklakeCatalogGenerator
                         (3, 'gamma', 30.75)
                     """);
 
-            // Table 16: Inlined data table with NULLs (tests NULL handling in inlined path)
+            // Table 16: Inlined data table with NULLs
             System.out.println("Creating inlined_nullable_table (inlined data with NULLs)...");
             stmt.execute("""
                     CREATE TABLE ducklake_db.test_schema.inlined_nullable_table (
@@ -626,7 +571,7 @@ public final class DucklakeCatalogGenerator
                         (3, NULL, 30.0)
                     """);
 
-            // Table 17: Mixed inlined + Parquet table in the same snapshot
+            // Table 17: Mixed inlined + Parquet table
             System.out.println("Creating mixed_inline_table (inlined + Parquet in same snapshot)...");
             stmt.execute("""
                     CREATE TABLE ducklake_db.test_schema.mixed_inline_table (
@@ -637,13 +582,11 @@ public final class DucklakeCatalogGenerator
                     """);
             stmt.execute("CALL ducklake_db.set_option('data_inlining_row_limit', 3, schema => 'test_schema', table_name => 'mixed_inline_table')");
 
-            // 2 rows <= limit -> inlined
             stmt.execute("""
                     INSERT INTO ducklake_db.test_schema.mixed_inline_table VALUES
                         (1, 'inlined', 11.0),
                         (2, 'inlined', 22.0)
                     """);
-            // 5 rows > limit -> Parquet file
             stmt.execute("""
                     INSERT INTO ducklake_db.test_schema.mixed_inline_table VALUES
                         (100, 'parquet', 100.0),
@@ -655,67 +598,35 @@ public final class DucklakeCatalogGenerator
 
             // ==================== Views ====================
 
-            // View 1: Simple view over simple_table (DuckDB dialect, but SQL compatible with Trino)
             System.out.println("Creating simple_view (compatible DuckDB view)...");
             stmt.execute("""
                     CREATE VIEW ducklake_db.test_schema.simple_view AS
                         SELECT id, name, price FROM ducklake_db.test_schema.simple_table WHERE active = true
                     """);
 
-            // View 2: View with column aliases
             System.out.println("Creating aliased_view (column aliases)...");
             stmt.execute("""
                     CREATE VIEW ducklake_db.test_schema.aliased_view (product_id, product_name, product_price) AS
                         SELECT id, name, price FROM ducklake_db.test_schema.simple_table
                     """);
 
-            // View 3: View with DuckDB-specific syntax (list_sort is DuckDB-only)
             System.out.println("Creating duckdb_specific_view (DuckDB-only syntax)...");
             stmt.execute("""
                     CREATE VIEW ducklake_db.test_schema.duckdb_specific_view AS
                         SELECT id, product_name, list_sort(tags) as sorted_tags FROM ducklake_db.test_schema.array_table
                     """);
 
-            // Detach WITHOUT checkpoint — inlined data stays in SQLite metadata
+            // Detach WITHOUT checkpoint — inlined data stays in metadata catalog
             System.out.println("Detaching catalog (no checkpoint — inlined data preserved)...");
             stmt.execute("DETACH ducklake_db");
 
             System.out.println();
-            System.out.println("✓ Test catalog created successfully!");
+            System.out.println("Test catalog created successfully!");
             System.out.println();
             System.out.println("Catalog location: " + catalogDirectory.toAbsolutePath());
             System.out.println(catalogDescription);
             System.out.println("Data directory: " + dataDir.toAbsolutePath());
-            System.out.println();
-            System.out.println("Tables created:");
-            System.out.println("  - test_schema.simple_table (5 rows, primitives only)");
-            System.out.println("  - test_schema.array_table (5 rows, with array(varchar))");
-            System.out.println("  - test_schema.partitioned_table (5 rows, partitioned by region)");
-            System.out.println("  - test_schema.temporal_partitioned_table (6 rows, partitioned by year/month)");
-            System.out.println("  - test_schema.daily_partitioned_table (5 rows, partitioned by year/month/day)");
-            System.out.println("  - test_schema.timestamp_partitioned_table (5 rows, TIMESTAMPTZ partitioned by year/month/day)");
-            System.out.println("  - test_schema.nested_table (3 rows, struct/map/nested arrays)");
-            System.out.println("  - test_schema.wide_types_table (3 rows, many primitive types)");
-            System.out.println("  - test_schema.nullable_table (4 rows, NULLs in every column type)");
-            System.out.println("  - test_schema.empty_table (0 rows, empty result set testing)");
-            System.out.println("  - test_schema.schema_evolution_table (4 rows, column added after initial write)");
-            System.out.println("  - test_schema.aggregation_table (30 rows, aggregation/stats testing)");
-            System.out.println("  - test_schema.deleted_rows_table (3 surviving rows, delete file handling)");
-            System.out.println("  - test_schema.complex_nulls_table (5 rows, full-NULL structs/arrays with null elements)");
-            System.out.println("  - test_schema.multi_file_table (5 rows across 3 Parquet files, multi-file scan)");
-            System.out.println("  - test_schema.inlined_table (3 rows, data inlined in metadata catalog)");
-            System.out.println("  - test_schema.inlined_nullable_table (3 rows, inlined data with NULLs)");
-            System.out.println("  - test_schema.mixed_inline_table (7 rows, 2 inlined + 5 Parquet in same snapshot)");
-            System.out.println();
-            System.out.println("Views created:");
-            System.out.println("  - test_schema.simple_view (SELECT from simple_table WHERE active=true, DuckDB dialect)");
-            System.out.println("  - test_schema.aliased_view (column aliases: product_id/product_name/product_price, DuckDB dialect)");
-            System.out.println("  - test_schema.duckdb_specific_view (DuckDB-only list_sort function, DuckDB dialect)");
         }
-
-        System.out.println();
-        System.out.println("You can now run tests with:");
-        System.out.println("  mvn test -Dtest=TestDucklakeCatalog");
     }
 
     private static void deleteDirectory(Path directory)
@@ -723,7 +634,7 @@ public final class DucklakeCatalogGenerator
     {
         if (Files.exists(directory)) {
             Files.walk(directory)
-                    .sorted((a, b) -> -a.compareTo(b)) // Reverse order to delete files before directories
+                    .sorted((a, b) -> -a.compareTo(b))
                     .forEach(path -> {
                         try {
                             Files.delete(path);

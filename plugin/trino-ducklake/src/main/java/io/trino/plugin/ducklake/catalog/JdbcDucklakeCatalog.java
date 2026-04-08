@@ -1384,13 +1384,13 @@ public class JdbcDucklakeCatalog
                     // Merge with existing: widen min/max, OR contains_null/contains_nan
                     try (PreparedStatement stmt = tx.getConnection().prepareStatement(
                             "UPDATE ducklake_table_column_stats SET " +
-                                    "contains_null = CASE WHEN contains_null = 1 THEN 1 WHEN ? = 1 THEN 1 ELSE 0 END, " +
-                                    "contains_nan = CASE WHEN ? = 1 THEN 1 ELSE contains_nan END, " +
+                                    "contains_null = (contains_null OR ?), " +
+                                    "contains_nan = (contains_nan OR ?), " +
                                     "min_value = CASE WHEN min_value IS NULL THEN ? WHEN ? IS NULL THEN min_value WHEN ? < min_value THEN ? ELSE min_value END, " +
                                     "max_value = CASE WHEN max_value IS NULL THEN ? WHEN ? IS NULL THEN max_value WHEN ? > max_value THEN ? ELSE max_value END " +
                                     "WHERE table_id = ? AND column_id = ?")) {
-                        stmt.setInt(1, agg.containsNull ? 1 : 0);
-                        stmt.setInt(2, agg.containsNan ? 1 : 0);
+                        stmt.setBoolean(1, agg.containsNull);
+                        stmt.setBoolean(2, agg.containsNan);
                         setNullableString(stmt, 3, agg.minValue);
                         setNullableString(stmt, 4, agg.minValue);
                         setNullableString(stmt, 5, agg.minValue);
@@ -1410,12 +1410,12 @@ public class JdbcDucklakeCatalog
                                     "VALUES (?, ?, ?, ?, ?, ?)")) {
                         stmt.setLong(1, tableId);
                         stmt.setLong(2, columnId);
-                        stmt.setLong(3, agg.containsNull ? 1 : 0);
+                        stmt.setBoolean(3, agg.containsNull);
                         if (agg.containsNan) {
-                            stmt.setLong(4, 1);
+                            stmt.setBoolean(4, true);
                         }
                         else {
-                            stmt.setNull(4, java.sql.Types.BIGINT);
+                            stmt.setNull(4, java.sql.Types.BOOLEAN);
                         }
                         setNullableString(stmt, 5, agg.minValue);
                         setNullableString(stmt, 6, agg.maxValue);

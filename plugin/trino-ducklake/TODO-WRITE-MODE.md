@@ -371,7 +371,7 @@ Total mandatory scenarios: 9.
 - [x] DDL (`CREATE/DROP SCHEMA`, `CREATE/DROP TABLE`) validated in all three catalogs.
 - [x] `INSERT` and `CTAS` implemented (unpartitioned).
 - [x] `INSERT` and `CTAS` validated in all three catalogs (19 write tests pass on each).
-- [ ] 9-scenario interoperability matrix green (cross-engine Trino→DuckDB read has SQLite visibility issue; see REPORT_CROSS_ENGINE_WRITE.md).
+- [ ] 9-scenario interoperability matrix green (cross-engine Trino→DuckDB value read returns zeros; catalog metadata ops work. See disabled tests in TestDucklakeCrossEngineCompatibility).
 - [x] No regressions on existing read-path suites.
 - [x] `STATUS.md` updated with exact write capability coverage and any explicit non-goals.
 
@@ -390,7 +390,7 @@ Total mandatory scenarios: 9.
 ## Immediate Next 5 Tasks (next sprint)
 
 1. [x] Isolate `TestDucklakeIntegration` with its own catalog to fix flaky `testSnapshotsAndCurrentSnapshotMetadataTables` (DDL tests pollute shared catalog snapshot count).
-2. [ ] Cross-engine validation with PostgreSQL catalog (bypass SQLite visibility issue).
+2. [x] Cross-engine validation with PostgreSQL catalog (bypass SQLite visibility issue). SQLite visibility issue confirmed bypassed. New finding: DuckDB returns zeros for column values in Trino-written Parquet files (likely missing `ducklake.column_id` Parquet metadata). Catalog metadata operations (SHOW TABLES, DESCRIBE, count) work correctly. Also fixed: `contains_null`/`contains_nan` boolean type mismatch in `commitInsert` (was using integer 0/1, PostgreSQL requires proper boolean).
 3. [ ] Partitioned data writes: compute partition values, write `ducklake_file_partition_value` rows.
 4. [ ] `DELETE` support: write delete Parquet files + `ducklake_delete_file` metadata rows.
 5. [ ] `UPDATE` as delete+insert in one snapshot commit.
