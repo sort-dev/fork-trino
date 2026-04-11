@@ -13,15 +13,12 @@
  */
 package io.trino.plugin.ducklake.catalog;
 
-import static java.util.Objects.requireNonNull;
-
+/**
+ * Partition value for a data file. The partitionValue may be null when the source column value is NULL.
+ */
 public record DucklakeFilePartitionValue(
         long dataFileId,
         int partitionKeyIndex,
         String partitionValue)
 {
-    public DucklakeFilePartitionValue
-    {
-        requireNonNull(partitionValue, "partitionValue is null");
-    }
 }

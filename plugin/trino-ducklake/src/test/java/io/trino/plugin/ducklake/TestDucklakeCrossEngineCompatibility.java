@@ -16,7 +16,6 @@ package io.trino.plugin.ducklake;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.parallel.Execution;
@@ -94,7 +93,6 @@ public class TestDucklakeCrossEngineCompatibility
 
     // ==================== Basic round-trip ====================
 
-    @Disabled("DuckDB returns zeros for column values in Trino-written Parquet files — likely missing ducklake.column_id Parquet metadata")
     @Test
     public void testTrinoInsertDuckdbRead()
             throws Exception
@@ -131,7 +129,6 @@ public class TestDucklakeCrossEngineCompatibility
 
     // ==================== CTAS round-trip ====================
 
-    @Disabled("DuckDB returns zeros for column values in Trino-written Parquet files — likely missing ducklake.column_id Parquet metadata")
     @Test
     public void testTrinoCtasDuckdbRead()
             throws Exception
@@ -161,7 +158,6 @@ public class TestDucklakeCrossEngineCompatibility
 
     // ==================== Multiple inserts ====================
 
-    @Disabled("DuckDB returns zeros for column values in Trino-written Parquet files — likely missing ducklake.column_id Parquet metadata")
     @Test
     public void testTrinoMultipleInsertsDuckdbRead()
             throws Exception
@@ -186,7 +182,6 @@ public class TestDucklakeCrossEngineCompatibility
 
     // ==================== Type coverage ====================
 
-    @Disabled("DuckDB returns zeros for column values in Trino-written Parquet files — likely missing ducklake.column_id Parquet metadata")
     @Test
     public void testTrinoTypesDuckdbRead()
             throws Exception
@@ -223,7 +218,6 @@ public class TestDucklakeCrossEngineCompatibility
 
     // ==================== NULLs ====================
 
-    @Disabled("DuckDB returns zeros for column values in Trino-written Parquet files — likely missing ducklake.column_id Parquet metadata")
     @Test
     public void testTrinoNullsDuckdbRead()
             throws Exception

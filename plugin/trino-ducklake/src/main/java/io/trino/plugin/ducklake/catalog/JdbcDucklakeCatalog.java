@@ -427,6 +427,44 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
+    public List<DucklakeColumn> getAllColumnsFlat(long tableId, long snapshotId)
+    {
+        String sql = "SELECT column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, nulls_allowed, parent_column " +
+                     "FROM ducklake_column " +
+                     "WHERE table_id = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL) " +
+                     "ORDER BY column_order, column_id";
+
+        List<DucklakeColumn> allColumns = new ArrayList<>();
+
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setLong(1, tableId);
+            stmt.setLong(2, snapshotId);
+            stmt.setLong(3, snapshotId);
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    allColumns.add(new DucklakeColumn(
+                            rs.getLong("column_id"),
+                            rs.getLong("begin_snapshot"),
+                            getLongOptional(rs, "end_snapshot"),
+                            rs.getLong("table_id"),
+                            rs.getLong("column_order"),
+                            rs.getString("column_name"),
+                            rs.getString("column_type"),
+                            rs.getBoolean("nulls_allowed"),
+                            getLongOptional(rs, "parent_column")));
+                }
+            }
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Failed to get all columns for table: " + tableId + " at snapshot: " + snapshotId, e);
+        }
+
+        return allColumns;
+    }
+
+    @Override
     public List<DucklakeDataFile> getDataFiles(long tableId, long snapshotId)
     {
         String sql = "SELECT data.data_file_id, data.table_id, data.begin_snapshot, data.end_snapshot, data.file_order, " +
@@ -1281,8 +1319,8 @@ public class JdbcDucklakeCatalog
                 try (PreparedStatement stmt = tx.getConnection().prepareStatement(
                         "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, " +
                                 "file_order, path, path_is_relative, file_format, record_count, file_size_bytes, " +
-                                "footer_size, row_id_start) " +
-                                "VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, ?, ?)")) {
+                                "footer_size, row_id_start, partition_id) " +
+                                "VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, ?, ?, ?)")) {
                     stmt.setLong(1, dataFileId);
                     stmt.setLong(2, tableId);
                     stmt.setLong(3, tx.getNewSnapshotId());
@@ -1292,7 +1330,34 @@ public class JdbcDucklakeCatalog
                     stmt.setLong(7, fragment.fileSizeBytes());
                     stmt.setLong(8, fragment.footerSize());
                     stmt.setLong(9, runningRowId);
+                    if (fragment.partitionId().isPresent()) {
+                        stmt.setLong(10, fragment.partitionId().getAsLong());
+                    }
+                    else {
+                        stmt.setNull(10, java.sql.Types.BIGINT);
+                    }
                     stmt.executeUpdate();
+                }
+
+                // Insert ducklake_file_partition_value rows for partitioned files
+                if (!fragment.partitionValues().isEmpty()) {
+                    try (PreparedStatement pvStmt = tx.getConnection().prepareStatement(
+                            "INSERT INTO ducklake_file_partition_value (table_id, data_file_id, partition_key_index, partition_value) " +
+                                    "VALUES (?, ?, ?, ?)")) {
+                        for (Map.Entry<Integer, String> pv : fragment.partitionValues().entrySet()) {
+                            pvStmt.setLong(1, tableId);
+                            pvStmt.setLong(2, dataFileId);
+                            pvStmt.setInt(3, pv.getKey());
+                            if (pv.getValue() != null) {
+                                pvStmt.setString(4, pv.getValue());
+                            }
+                            else {
+                                pvStmt.setNull(4, java.sql.Types.VARCHAR);
+                            }
+                            pvStmt.addBatch();
+                        }
+                        pvStmt.executeBatch();
+                    }
                 }
 
                 // Insert ducklake_file_column_stats per column

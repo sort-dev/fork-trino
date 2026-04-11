@@ -78,9 +78,15 @@ public interface DucklakeCatalog
     Optional<DucklakeTable> getTableById(long tableId, long snapshotId);
 
     /**
-     * Get columns for a table at the given snapshot
+     * Get top-level columns for a table at the given snapshot (nested types resolved into type strings).
      */
     List<DucklakeColumn> getTableColumns(long tableId, long snapshotId);
+
+    /**
+     * Get all columns (including nested) for a table at the given snapshot as a flat list.
+     * Each column retains its {@code parentColumn} reference. Used for Parquet field_id mapping.
+     */
+    List<DucklakeColumn> getAllColumnsFlat(long tableId, long snapshotId);
 
     /**
      * Get data files for a table at the given snapshot

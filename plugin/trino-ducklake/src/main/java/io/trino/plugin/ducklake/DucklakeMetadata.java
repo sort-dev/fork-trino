@@ -117,15 +117,16 @@ public class DucklakeMetadata
     private final DucklakeSnapshotResolver snapshotResolver;
     private final JsonCodec<DucklakeWriteFragment> fragmentCodec;
     private final DucklakePathResolver pathResolver;
+    private final DucklakeTemporalPartitionEncoding temporalPartitionEncoding;
 
     public DucklakeMetadata(DucklakeCatalog catalog, DucklakeTypeConverter typeConverter)
     {
-        this(catalog, typeConverter, new DucklakeSnapshotResolver(catalog, OptionalLong.empty(), Optional.empty()), null, null);
+        this(catalog, typeConverter, new DucklakeSnapshotResolver(catalog, OptionalLong.empty(), Optional.empty()), null, null, DucklakeTemporalPartitionEncoding.CALENDAR);
     }
 
     public DucklakeMetadata(DucklakeCatalog catalog, DucklakeTypeConverter typeConverter, DucklakeSnapshotResolver snapshotResolver)
     {
-        this(catalog, typeConverter, snapshotResolver, null, null);
+        this(catalog, typeConverter, snapshotResolver, null, null, DucklakeTemporalPartitionEncoding.CALENDAR);
     }
 
     public DucklakeMetadata(
@@ -133,13 +134,15 @@ public class DucklakeMetadata
             DucklakeTypeConverter typeConverter,
             DucklakeSnapshotResolver snapshotResolver,
             JsonCodec<DucklakeWriteFragment> fragmentCodec,
-            DucklakePathResolver pathResolver)
+            DucklakePathResolver pathResolver,
+            DucklakeTemporalPartitionEncoding temporalPartitionEncoding)
     {
         this.catalog = requireNonNull(catalog, "catalog is null");
         this.typeConverter = requireNonNull(typeConverter, "typeConverter is null");
         this.snapshotResolver = requireNonNull(snapshotResolver, "snapshotResolver is null");
         this.fragmentCodec = fragmentCodec;
         this.pathResolver = pathResolver;
+        this.temporalPartitionEncoding = requireNonNull(temporalPartitionEncoding, "temporalPartitionEncoding is null");
     }
 
     @Override
@@ -832,6 +835,13 @@ public class DucklakeMetadata
                 .map(DucklakeColumnHandle.class::cast)
                 .collect(toImmutableList());
 
+        List<DucklakeColumn> allCatalogColumns = catalog.getAllColumnsFlat(handle.tableId(), handle.snapshotId());
+
+        List<DucklakePartitionSpec> partitionSpecs = catalog.getPartitionSpecs(handle.tableId(), handle.snapshotId());
+        Optional<DucklakePartitionSpec> activePartitionSpec = partitionSpecs.isEmpty()
+                ? Optional.empty()
+                : Optional.of(partitionSpecs.getLast());
+
         String tableDataPath = resolveTableDataPath(handle.schemaName(), handle.tableName(), handle.snapshotId());
 
         return new DucklakeWritableTableHandle(
@@ -839,7 +849,10 @@ public class DucklakeMetadata
                 handle.tableName(),
                 handle.tableId(),
                 ducklakeColumns,
-                tableDataPath);
+                allCatalogColumns,
+                tableDataPath,
+                activePartitionSpec,
+                temporalPartitionEncoding);
     }
 
     @Override
@@ -905,6 +918,13 @@ public class DucklakeMetadata
                         col.nullsAllowed()))
                 .collect(toImmutableList());
 
+        List<DucklakeColumn> allCatalogColumns = catalog.getAllColumnsFlat(table.get().tableId(), snapshotId);
+
+        List<DucklakePartitionSpec> partitionSpecs = catalog.getPartitionSpecs(table.get().tableId(), snapshotId);
+        Optional<DucklakePartitionSpec> activePartitionSpec = partitionSpecs.isEmpty()
+                ? Optional.empty()
+                : Optional.of(partitionSpecs.getLast());
+
         String tableDataPath = resolveTableDataPath(tableName.getSchemaName(), tableName.getTableName(), snapshotId);
 
         return new DucklakeWritableTableHandle(
@@ -912,7 +932,10 @@ public class DucklakeMetadata
                 tableName.getTableName(),
                 table.get().tableId(),
                 columnHandles,
-                tableDataPath);
+                allCatalogColumns,
+                tableDataPath,
+                activePartitionSpec,
+                temporalPartitionEncoding);
     }
 
     @Override

@@ -13,13 +13,17 @@
  */
 package io.trino.plugin.ducklake.catalog;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import static java.util.Objects.requireNonNull;
 
 public record DucklakePartitionField(
-        int partitionKeyIndex,
-        long columnId,
-        DucklakePartitionTransform transform)
+        @JsonProperty("partitionKeyIndex") int partitionKeyIndex,
+        @JsonProperty("columnId") long columnId,
+        @JsonProperty("transform") DucklakePartitionTransform transform)
 {
+    @JsonCreator
     public DucklakePartitionField
     {
         requireNonNull(transform, "transform is null");

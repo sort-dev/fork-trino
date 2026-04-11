@@ -18,7 +18,9 @@ import io.airlift.json.JsonCodecFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -88,5 +90,38 @@ class TestDucklakeWriteFragment
         assertThat(roundTripped.maxValue()).isEmpty();
         assertThat(roundTripped.containsNan()).isTrue();
         assertThat(roundTripped.nullCount()).isEqualTo(100L);
+    }
+
+    @Test
+    void testFragmentWithPartitionValues()
+    {
+        DucklakeWriteFragment original = new DucklakeWriteFragment(
+                "region=US/ducklake-abc.parquet",
+                1024L,
+                200L,
+                50L,
+                List.of(new DucklakeFileColumnStats(1L, 512L, 50L, 0L, Optional.of("1"), Optional.of("50"), false)),
+                Map.of(0, "US"),
+                OptionalLong.of(42L));
+
+        String json = FRAGMENT_CODEC.toJson(original);
+        DucklakeWriteFragment deserialized = FRAGMENT_CODEC.fromJson(json);
+
+        assertThat(deserialized.partitionValues()).isEqualTo(Map.of(0, "US"));
+        assertThat(deserialized.partitionId()).isEqualTo(OptionalLong.of(42L));
+    }
+
+    @Test
+    void testFragmentWithoutPartitionValues()
+    {
+        // Unpartitioned fragment using convenience constructor
+        DucklakeWriteFragment original = new DucklakeWriteFragment(
+                "ducklake-nopart.parquet", 1024L, 200L, 50L, List.of());
+
+        String json = FRAGMENT_CODEC.toJson(original);
+        DucklakeWriteFragment deserialized = FRAGMENT_CODEC.fromJson(json);
+
+        assertThat(deserialized.partitionValues()).isEmpty();
+        assertThat(deserialized.partitionId()).isEmpty();
     }
 }

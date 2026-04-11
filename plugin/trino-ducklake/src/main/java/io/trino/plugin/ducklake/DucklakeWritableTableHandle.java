@@ -15,10 +15,13 @@ package io.trino.plugin.ducklake;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.trino.plugin.ducklake.catalog.DucklakeColumn;
+import io.trino.plugin.ducklake.catalog.DucklakePartitionSpec;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 
 import java.util.List;
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
@@ -27,7 +30,10 @@ public record DucklakeWritableTableHandle(
         @JsonProperty("tableName") String tableName,
         @JsonProperty("tableId") long tableId,
         @JsonProperty("columns") List<DucklakeColumnHandle> columns,
-        @JsonProperty("tableDataPath") String tableDataPath)
+        @JsonProperty("allCatalogColumns") List<DucklakeColumn> allCatalogColumns,
+        @JsonProperty("tableDataPath") String tableDataPath,
+        @JsonProperty("partitionSpec") Optional<DucklakePartitionSpec> partitionSpec,
+        @JsonProperty("temporalPartitionEncoding") DucklakeTemporalPartitionEncoding temporalPartitionEncoding)
         implements ConnectorInsertTableHandle, ConnectorOutputTableHandle
 {
     @JsonCreator
@@ -37,7 +43,11 @@ public record DucklakeWritableTableHandle(
         requireNonNull(tableName, "tableName is null");
         requireNonNull(columns, "columns is null");
         columns = List.copyOf(columns);
+        requireNonNull(allCatalogColumns, "allCatalogColumns is null");
+        allCatalogColumns = List.copyOf(allCatalogColumns);
         requireNonNull(tableDataPath, "tableDataPath is null");
+        requireNonNull(partitionSpec, "partitionSpec is null");
+        requireNonNull(temporalPartitionEncoding, "temporalPartitionEncoding is null");
     }
 
     @Override

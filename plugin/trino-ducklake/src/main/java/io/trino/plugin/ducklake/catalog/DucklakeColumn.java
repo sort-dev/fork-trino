@@ -13,6 +13,9 @@
  */
 package io.trino.plugin.ducklake.catalog;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
@@ -21,16 +24,17 @@ import static java.util.Objects.requireNonNull;
  * Represents a column from the ducklake_column table.
  */
 public record DucklakeColumn(
-        long columnId,
-        long beginSnapshot,
-        Optional<Long> endSnapshot,
-        long tableId,
-        long columnOrder,
-        String columnName,
-        String columnType,
-        boolean nullsAllowed,
-        Optional<Long> parentColumn)
+        @JsonProperty("columnId") long columnId,
+        @JsonProperty("beginSnapshot") long beginSnapshot,
+        @JsonProperty("endSnapshot") Optional<Long> endSnapshot,
+        @JsonProperty("tableId") long tableId,
+        @JsonProperty("columnOrder") long columnOrder,
+        @JsonProperty("columnName") String columnName,
+        @JsonProperty("columnType") String columnType,
+        @JsonProperty("nullsAllowed") boolean nullsAllowed,
+        @JsonProperty("parentColumn") Optional<Long> parentColumn)
 {
+    @JsonCreator
     public DucklakeColumn
     {
         requireNonNull(columnName, "columnName is null");

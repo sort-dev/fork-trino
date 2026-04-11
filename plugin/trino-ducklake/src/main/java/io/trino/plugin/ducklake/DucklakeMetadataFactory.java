@@ -26,6 +26,7 @@ public class DucklakeMetadataFactory
     private final DucklakeSnapshotResolver snapshotResolver;
     private final JsonCodec<DucklakeWriteFragment> fragmentCodec;
     private final DucklakePathResolver pathResolver;
+    private final DucklakeTemporalPartitionEncoding temporalPartitionEncoding;
 
     @Inject
     public DucklakeMetadataFactory(
@@ -33,17 +34,19 @@ public class DucklakeMetadataFactory
             DucklakeTypeConverter typeConverter,
             DucklakeSnapshotResolver snapshotResolver,
             JsonCodec<DucklakeWriteFragment> fragmentCodec,
-            DucklakePathResolver pathResolver)
+            DucklakePathResolver pathResolver,
+            DucklakeConfig config)
     {
         this.catalog = requireNonNull(catalog, "catalog is null");
         this.typeConverter = requireNonNull(typeConverter, "typeConverter is null");
         this.snapshotResolver = requireNonNull(snapshotResolver, "snapshotResolver is null");
         this.fragmentCodec = requireNonNull(fragmentCodec, "fragmentCodec is null");
         this.pathResolver = requireNonNull(pathResolver, "pathResolver is null");
+        this.temporalPartitionEncoding = requireNonNull(config, "config is null").getTemporalPartitionEncoding();
     }
 
     public DucklakeMetadata create()
     {
-        return new DucklakeMetadata(catalog, typeConverter, snapshotResolver, fragmentCodec, pathResolver);
+        return new DucklakeMetadata(catalog, typeConverter, snapshotResolver, fragmentCodec, pathResolver, temporalPartitionEncoding);
     }
 }

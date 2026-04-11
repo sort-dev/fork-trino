@@ -17,6 +17,7 @@ import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
 import io.trino.spi.NodeVersion;
+import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPageSink;
@@ -34,18 +35,21 @@ public class DucklakePageSinkProvider
     private final JsonCodec<DucklakeWriteFragment> fragmentCodec;
     private final ParquetWriterConfig parquetWriterConfig;
     private final String trinoVersion;
+    private final PageIndexerFactory pageIndexerFactory;
 
     @Inject
     public DucklakePageSinkProvider(
             DucklakeFileSystemFactory fileSystemFactory,
             JsonCodec<DucklakeWriteFragment> fragmentCodec,
             ParquetWriterConfig parquetWriterConfig,
-            NodeVersion nodeVersion)
+            NodeVersion nodeVersion,
+            PageIndexerFactory pageIndexerFactory)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.fragmentCodec = requireNonNull(fragmentCodec, "fragmentCodec is null");
         this.parquetWriterConfig = requireNonNull(parquetWriterConfig, "parquetWriterConfig is null");
         this.trinoVersion = requireNonNull(nodeVersion, "nodeVersion is null").toString();
+        this.pageIndexerFactory = requireNonNull(pageIndexerFactory, "pageIndexerFactory is null");
     }
 
     @Override
@@ -75,6 +79,7 @@ public class DucklakePageSinkProvider
                 fileSystemFactory.create(session),
                 fragmentCodec,
                 parquetWriterConfig,
-                trinoVersion);
+                trinoVersion,
+                pageIndexerFactory);
     }
 }

@@ -25,18 +25,23 @@ import io.trino.parquet.writer.ParquetWriter;
 import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
 import io.trino.spi.Page;
+import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.type.Type;
 import org.apache.parquet.format.CompressionCodec;
 import org.apache.parquet.format.FileMetaData;
+import org.apache.parquet.schema.MessageType;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -58,22 +63,25 @@ public class DucklakePageSink
 
     private final List<Type> columnTypes;
     private final List<String> columnNames;
-    private final ParquetSchemaConverter schemaConverter;
+    private final MessageType messageType;
+    private final Map<List<String>, Type> primitiveTypes;
 
+    // Partition support
+    private final DucklakePagePartitioner partitioner;
+
+    // Writers: for unpartitioned tables, only index 0 is used.
+    // For partitioned tables, one writer per unique partition combination.
+    private final List<WriterContext> writers = new ArrayList<>();
     private final List<DucklakeWriteFragment> completedFragments = new ArrayList<>();
     private final List<Location> writtenFilePaths = new ArrayList<>();
-
-    private ParquetWriter currentWriter;
-    private OutputStream currentOutputStream;
-    private String currentFileName;
-    private long currentWrittenBytes;
 
     public DucklakePageSink(
             DucklakeWritableTableHandle handle,
             TrinoFileSystem fileSystem,
             JsonCodec<DucklakeWriteFragment> fragmentCodec,
             ParquetWriterConfig parquetWriterConfig,
-            String trinoVersion)
+            String trinoVersion,
+            PageIndexerFactory pageIndexerFactory)
     {
         this.handle = requireNonNull(handle, "handle is null");
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
@@ -96,11 +104,26 @@ public class DucklakePageSink
                 .map(DucklakeColumnHandle::columnName)
                 .collect(toImmutableList());
 
-        this.schemaConverter = new ParquetSchemaConverter(
-                columnTypes,
-                columnNames,
-                false,
-                false);
+        // Build Parquet schema with field_id annotations for DuckDB compatibility
+        ParquetSchemaConverter schemaConverter = new ParquetSchemaConverter(
+                columnTypes, columnNames, false, false);
+        this.primitiveTypes = schemaConverter.getPrimitiveTypes();
+        this.messageType = DucklakeParquetSchemaBuilder.buildMessageType(
+                handle.columns(),
+                handle.allCatalogColumns(),
+                schemaConverter.getMessageType());
+
+        // Set up partitioner if table is partitioned
+        if (handle.partitionSpec().isPresent()) {
+            this.partitioner = new DucklakePagePartitioner(
+                    requireNonNull(pageIndexerFactory, "pageIndexerFactory is null"),
+                    handle.partitionSpec().get(),
+                    handle.columns(),
+                    handle.temporalPartitionEncoding());
+        }
+        else {
+            this.partitioner = null;
+        }
     }
 
     @Override
@@ -111,15 +134,11 @@ public class DucklakePageSink
         }
 
         try {
-            if (currentWriter == null) {
-                openNewWriter();
+            if (partitioner == null) {
+                appendUnpartitioned(page);
             }
-
-            currentWriter.write(page);
-            currentWrittenBytes = currentWriter.getWrittenBytes() + currentWriter.getBufferedBytes();
-
-            if (currentWrittenBytes >= targetMaxFileSize) {
-                closeCurrentWriter();
+            else {
+                appendPartitioned(page);
             }
         }
         catch (IOException e) {
@@ -129,12 +148,75 @@ public class DucklakePageSink
         return NOT_BLOCKED;
     }
 
+    private void appendUnpartitioned(Page page)
+            throws IOException
+    {
+        if (writers.isEmpty()) {
+            writers.add(openNewWriter(Map.of()));
+        }
+
+        WriterContext writer = writers.getFirst();
+        writer.write(page);
+
+        if (writer.getWrittenBytes() >= targetMaxFileSize) {
+            closeWriter(0);
+            writers.set(0, openNewWriter(Map.of()));
+        }
+    }
+
+    private void appendPartitioned(Page page)
+            throws IOException
+    {
+        int[] writerIndexes = partitioner.partitionPage(page);
+        int maxIndex = partitioner.getMaxIndex();
+
+        // Ensure writers list is big enough
+        while (writers.size() <= maxIndex) {
+            writers.add(null);
+        }
+
+        // Group positions by writer index
+        Map<Integer, List<Integer>> positionsByWriter = new HashMap<>();
+        for (int position = 0; position < page.getPositionCount(); position++) {
+            positionsByWriter.computeIfAbsent(writerIndexes[position], _ -> new ArrayList<>()).add(position);
+        }
+
+        // Write to each partition's writer
+        for (Map.Entry<Integer, List<Integer>> entry : positionsByWriter.entrySet()) {
+            int writerIndex = entry.getKey();
+            List<Integer> positions = entry.getValue();
+            int[] posArray = positions.stream().mapToInt(Integer::intValue).toArray();
+
+            // Get or create writer for this partition
+            WriterContext writer = writers.get(writerIndex);
+            if (writer == null) {
+                // Compute partition values from the first row in this partition
+                Map<Integer, String> partitionValues = partitioner.getPartitionValues(page, posArray[0]);
+                writer = openNewWriter(partitionValues);
+                writers.set(writerIndex, writer);
+            }
+
+            // Extract sub-page for this partition
+            Page partitionPage = page.getPositions(posArray, 0, posArray.length);
+            writer.write(partitionPage);
+
+            // Rotate if over target size
+            if (writer.getWrittenBytes() >= targetMaxFileSize) {
+                closeWriter(writerIndex);
+                Map<Integer, String> partitionValues = partitioner.getPartitionValues(page, posArray[0]);
+                writers.set(writerIndex, openNewWriter(partitionValues));
+            }
+        }
+    }
+
     @Override
     public CompletableFuture<Collection<Slice>> finish()
     {
         try {
-            if (currentWriter != null) {
-                closeCurrentWriter();
+            for (int i = 0; i < writers.size(); i++) {
+                if (writers.get(i) != null) {
+                    closeWriter(i);
+                }
             }
         }
         catch (IOException e) {
@@ -151,16 +233,18 @@ public class DucklakePageSink
     @Override
     public void abort()
     {
-        // Close writer if open
-        if (currentWriter != null) {
-            try {
-                currentWriter.close();
+        // Close all open writers
+        for (WriterContext writer : writers) {
+            if (writer != null) {
+                try {
+                    writer.close();
+                }
+                catch (IOException e) {
+                    log.warn(e, "Failed to close writer during abort");
+                }
             }
-            catch (IOException e) {
-                log.warn(e, "Failed to close writer during abort");
-            }
-            currentWriter = null;
         }
+        writers.clear();
 
         // Best-effort delete all written files
         for (Location path : writtenFilePaths) {
@@ -173,43 +257,64 @@ public class DucklakePageSink
         }
     }
 
-    private void openNewWriter()
+    private WriterContext openNewWriter(Map<Integer, String> partitionValues)
             throws IOException
     {
-        currentFileName = "ducklake-" + UUID.randomUUID() + ".parquet";
-        Location filePath = Location.of(handle.tableDataPath()).appendPath(currentFileName);
+        String fileName = "ducklake-" + UUID.randomUUID() + ".parquet";
+
+        // Build path: for partitioned tables, create subdirectories like region=us/
+        String relativePath;
+        if (!partitionValues.isEmpty()) {
+            StringBuilder pathBuilder = new StringBuilder();
+            partitionValues.entrySet().stream()
+                    .sorted(Map.Entry.comparingByKey())
+                    .forEach(entry -> {
+                        String colName = partitioner.getPartitionColumnName(entry.getKey());
+                        String value = entry.getValue() != null ? entry.getValue() : "__HIVE_DEFAULT_PARTITION__";
+                        pathBuilder.append(colName).append("=").append(value).append("/");
+                    });
+            pathBuilder.append(fileName);
+            relativePath = pathBuilder.toString();
+        }
+        else {
+            relativePath = fileName;
+        }
+
+        Location filePath = Location.of(handle.tableDataPath()).appendPath(relativePath);
         writtenFilePaths.add(filePath);
 
         TrinoOutputFile outputFile = fileSystem.newOutputFile(filePath);
-        currentOutputStream = outputFile.create();
+        OutputStream outputStream = outputFile.create();
 
-        currentWriter = new ParquetWriter(
-                currentOutputStream,
-                schemaConverter.getMessageType(),
-                schemaConverter.getPrimitiveTypes(),
+        ParquetWriter parquetWriter = new ParquetWriter(
+                outputStream,
+                messageType,
+                primitiveTypes,
                 writerOptions,
                 CompressionCodec.ZSTD,
                 trinoVersion,
                 Optional.empty(),
                 Optional.empty());
 
-        currentWrittenBytes = 0;
+        OptionalLong partitionId = partitioner != null ? OptionalLong.of(partitioner.getPartitionId()) : OptionalLong.empty();
+        return new WriterContext(parquetWriter, outputStream, relativePath, partitionValues, partitionId);
     }
 
-    private void closeCurrentWriter()
+    private void closeWriter(int index)
             throws IOException
     {
-        if (currentWriter == null) {
+        WriterContext writer = writers.get(index);
+        if (writer == null) {
             return;
         }
 
-        currentWriter.close();
+        writer.close();
 
-        FileMetaData fileMetaData = currentWriter.getFileMetaData();
+        FileMetaData fileMetaData = writer.getFileMetaData();
         long recordCount = fileMetaData.getNum_rows();
-        long fileSize = currentWriter.getWrittenBytes();
+        long fileSize = writer.getWrittenBytes();
 
-        // Compute footer size by serializing the metadata (matches what ParquetWriter wrote)
+        // Compute footer size
         long footerSize;
         try {
             io.airlift.slice.DynamicSliceOutput footerOutput = new io.airlift.slice.DynamicSliceOutput(40);
@@ -217,8 +322,6 @@ public class DucklakePageSink
             footerSize = footerOutput.size();
         }
         catch (IOException e) {
-            // Fall back to computing from file layout: fileSize - 4(magic) - data - 4(footerLen) - 4(magic)
-            // This shouldn't happen since we just successfully wrote the file
             footerSize = 0;
         }
 
@@ -226,15 +329,59 @@ public class DucklakePageSink
                 DucklakeStatsExtractor.extractStats(fileMetaData, handle.columns());
 
         completedFragments.add(new DucklakeWriteFragment(
-                currentFileName,
+                writer.relativePath,
                 fileSize,
                 footerSize,
                 recordCount,
-                columnStats));
+                columnStats,
+                writer.partitionValues,
+                writer.partitionId));
 
-        currentWriter = null;
-        currentOutputStream = null;
-        currentFileName = null;
-        currentWrittenBytes = 0;
+        writers.set(index, null);
+    }
+
+    private static class WriterContext
+    {
+        private final ParquetWriter parquetWriter;
+        private final OutputStream outputStream;
+        private final String relativePath;
+        private final Map<Integer, String> partitionValues;
+        private final OptionalLong partitionId;
+
+        WriterContext(
+                ParquetWriter parquetWriter,
+                OutputStream outputStream,
+                String relativePath,
+                Map<Integer, String> partitionValues,
+                OptionalLong partitionId)
+        {
+            this.parquetWriter = requireNonNull(parquetWriter, "parquetWriter is null");
+            this.outputStream = requireNonNull(outputStream, "outputStream is null");
+            this.relativePath = requireNonNull(relativePath, "relativePath is null");
+            this.partitionValues = new HashMap<>(requireNonNull(partitionValues, "partitionValues is null"));
+            this.partitionId = requireNonNull(partitionId, "partitionId is null");
+        }
+
+        void write(Page page)
+                throws IOException
+        {
+            parquetWriter.write(page);
+        }
+
+        long getWrittenBytes()
+        {
+            return parquetWriter.getWrittenBytes() + parquetWriter.getBufferedBytes();
+        }
+
+        void close()
+                throws IOException
+        {
+            parquetWriter.close();
+        }
+
+        FileMetaData getFileMetaData()
+        {
+            return parquetWriter.getFileMetaData();
+        }
     }
 }

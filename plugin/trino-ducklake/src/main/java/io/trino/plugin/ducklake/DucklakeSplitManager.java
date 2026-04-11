@@ -395,14 +395,18 @@ public class DucklakeSplitManager
                 List<DucklakeFilePartitionValue> values = filePartValues.getOrDefault(fileId, List.of());
                 // A file is pruned if ANY partition transform definitively excludes it
                 for (PartitionKeyMapping mapping : mappings) {
-                    Optional<String> partValue = values.stream()
+                    Optional<DucklakeFilePartitionValue> partEntry = values.stream()
                             .filter(v -> v.partitionKeyIndex() == mapping.keyIndex())
-                            .map(DucklakeFilePartitionValue::partitionValue)
                             .findFirst();
-                    if (partValue.isEmpty()) {
+                    if (partEntry.isEmpty()) {
                         continue;
                     }
-                    if (!partitionValueMatchesDomain(column.columnType(), partValue.get(), domain, mapping.transform())) {
+                    String partValue = partEntry.get().partitionValue();
+                    if (partValue == null) {
+                        // Null partition value — can only match IS NULL predicates, don't prune
+                        continue;
+                    }
+                    if (!partitionValueMatchesDomain(column.columnType(), partValue, domain, mapping.transform())) {
                         return true; // this transform excludes the file
                     }
                 }

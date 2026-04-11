@@ -19,7 +19,6 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Utility to generate a test Ducklake catalog using DuckDB's embedded JDBC driver.
