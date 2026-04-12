@@ -10,12 +10,15 @@ Supported today:
 - Full read path (current snapshot, time travel, metadata tables, pruning).
 - DDL writes: `CREATE/DROP VIEW`, `CREATE/DROP SCHEMA`, `CREATE/DROP TABLE`.
 - Table DDL with nested types (`ARRAY`, `ROW`, `MAP`) and `partitioned_by` table property parsing.
-- Data writes: `INSERT` and `CREATE TABLE AS SELECT` (unpartitioned tables).
+- Data writes: `INSERT` and `CREATE TABLE AS SELECT` (unpartitioned and partitioned tables).
+- Partitioned writes with identity and temporal transforms (YEAR, MONTH, DAY, HOUR).
+- Calendar and epoch temporal partition encoding support.
+- Cross-engine compatibility: Trino-written Parquet files include `field_id` for DuckDB column mapping.
 
 Not yet supported:
-- Partitioned data writes.
 - Row-level mutations: `DELETE`, `UPDATE`, `MERGE`.
 - `ALTER TABLE` family.
+- Maintenance operations (optimize, expire snapshots, orphan cleanup).
 
 ## Documentation
 

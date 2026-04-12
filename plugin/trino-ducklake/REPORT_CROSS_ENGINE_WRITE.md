@@ -91,23 +91,21 @@ The spec defines `ducklake_schema_versions` with two columns: `begin_snapshot` a
 
 Add `table_id` to the spec for `ducklake_schema_versions`.
 
-## Issue 5: DuckDB returns zeros for column values in Trino-written Parquet files
+## Issue 5: DuckDB returns zeros for column values in Trino-written Parquet files — RESOLVED
 
 ### Problem
 
 When DuckDB reads Parquet files written by Trino through a DuckLake catalog, metadata operations work correctly (SHOW TABLES, DESCRIBE, row counts) but actual column values are returned as zeros/empty. DuckDB-created Parquet files read correctly through the same catalog.
 
-This suggests DuckDB's DuckLake extension uses Parquet-level metadata (likely `ducklake.column_id` key-value metadata) to map columns, and Trino's Parquet writer does not include this metadata.
+DuckDB's DuckLake extension uses Parquet `field_id` to map columns to `ducklake_column.column_id`. Trino's standard `ParquetSchemaConverter` does not set `field_id` on the Parquet schema.
 
-### Impact
+### Resolution
 
-Trino-written data is invisible at the value level to DuckDB, though catalog metadata (table discovery, schema, row counts) works correctly. This is a blocker for full bidirectional interoperability.
+Implemented `DucklakeParquetSchemaBuilder` which rebuilds the Parquet `MessageType` with `field_id` annotations from DuckLake `column_id` values. Supports nested types (ROW, ARRAY, MAP) with recursive field_id assignment.
 
-### Status
+All 10 cross-engine tests now pass, including full column value round-trips.
 
-5 cross-engine tests are `@Disabled` pending resolution. Tests that verify metadata-only operations pass.
-
-### Suggestion
+### Original Suggestion (still relevant for spec)
 
 - Document what Parquet file-level or column-level metadata DuckDB expects for column mapping
 - Consider whether column mapping should be by name (Parquet schema) rather than by custom metadata, for engine independence

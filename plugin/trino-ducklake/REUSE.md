@@ -4,20 +4,27 @@ Goal: maximize reuse of public Trino/Iceberg/Hive reader infrastructure and keep
 
 ## Directly Reused
 - Trino file system stack (`TrinoFileSystem`, `TrinoFileSystemFactory`, `Location`).
-- Trino Parquet stack (`ParquetReader`, `ParquetPageSource`, row-group pruning via `getFilteredRowGroups`, page-level filtering, reader options).
+- Trino Parquet reader stack (`ParquetReader`, `ParquetPageSource`, row-group pruning via `getFilteredRowGroups`, page-level filtering, reader options).
+- Trino Parquet writer stack (`ParquetWriter`, `ParquetWriterOptions`, `ParquetSchemaConverter` for type mapping).
 - Hive Parquet datasource factory (`ParquetPageSourceFactory.createDataSource`).
 - Hive `TransformConnectorPageSource` for schema-evolution null column injection.
+- Hive `ParquetWriterConfig` for writer configuration binding.
+- `PageIndexerFactory` from Trino SPI for partition-aware writer routing.
 - Standard SPI components (`FixedSplitSource`, `InMemoryRecordSet`, `RecordPageSource`, connector interfaces, classloader-safe wrappers).
 - Standard metrics/memory/context infrastructure.
 
 ## Adapted Patterns
 - Connector factory/module/page-source factory patterns adapted from Iceberg/Hive connector style.
 - Predicate/split/page-source flow mirrors Iceberg structure at a high level.
+- Multi-writer page sink pattern (one writer per partition) adapted from Iceberg/Delta.
+- Parquet field_id annotation pattern adapted from Iceberg (but custom implementation — Iceberg uses its own `ParquetSchemaUtil`, we use `DucklakeParquetSchemaBuilder` to avoid Iceberg library dependency).
 
 ## Ducklake-Specific (Expected)
-- SQL catalog access layer.
+- SQL catalog access layer (`JdbcDucklakeCatalog`).
 - Ducklake metadata models and path resolution.
 - Ducklake type string parsing and mapping.
+- Partition value computation for DuckLake transforms with calendar/epoch encoding (`DucklakePartitionComputer`).
+- Parquet `field_id` annotation from DuckLake `column_id` (`DucklakeParquetSchemaBuilder`).
 
 ## P2.1 Reuse Evaluation (Completed)
 

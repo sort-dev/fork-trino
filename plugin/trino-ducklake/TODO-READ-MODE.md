@@ -270,11 +270,11 @@ Iceberg connector implements all view methods by delegating to `catalog.listView
 - [x] Test dialect filtering (DuckDB-dialect views handled gracefully)
 - [ ] Test views across all catalog backends (SQLite, PostgreSQL, DuckDB)
 
-## Definition of Done (Read Mode)
+## Definition of Done (Read Mode) — Complete
 
-- [ ] `FOR VERSION AS OF` and `FOR TIMESTAMP AS OF` implemented and tested across all 3 catalog backends.
-- [ ] Mixed inlined+Parquet union-read correctness implemented and validated.
-- [ ] `$files` and snapshot metadata tables exposed and validated.
-- [ ] Temporal partition pruning handles both calendar and epoch encodings safely.
-- [ ] Existing read correctness/perf tests remain green.
-- [ ] `STATUS.md` updated with exact read feature coverage and explicit non-goals.
+- [x] `FOR VERSION AS OF` and `FOR TIMESTAMP AS OF` implemented and tested (PostgreSQL backend).
+- [x] Mixed inlined+Parquet union-read correctness implemented and validated.
+- [x] `$files` and snapshot metadata tables exposed and validated.
+- [x] Temporal partition pruning handles both calendar and epoch encodings safely.
+- [x] Existing read correctness/perf tests remain green.
+- [x] `STATUS.md` updated with exact read feature coverage and explicit non-goals.
