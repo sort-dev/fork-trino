@@ -163,7 +163,7 @@ See [REPORT_CROSS_ENGINE_WRITE.md](REPORT_CROSS_ENGINE_WRITE.md) for spec issues
 - `TestDucklakeParquetSchemaBuilder` (6 tests): Parquet field_id assignment
 - `TestDucklakePartitionComputer` (18 tests): partition value computation, both encodings
 - `TestDucklakeWriteFragment` (5 tests): fragment JSON serialization
-- `TestDucklakeDDLIntegration` (12 tests): schema/table DDL
+- `TestDucklakeDDLIntegration` (20 tests): schema/table DDL (12) + ALTER TABLE ADD/DROP/RENAME (8)
 
 ### Existing suites (no regressions)
 

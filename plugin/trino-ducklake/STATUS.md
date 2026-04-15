@@ -124,20 +124,32 @@ Implemented via Trino's merge-on-read pattern (`ConnectorMergeSink`):
 - `DucklakeMergeSink` groups deleted row IDs by data file, writes per-file Parquet delete files.
 - Snapshot changes use spec-compliant comma-separated format (one row per snapshot).
 
+### ALTER TABLE (schema evolution)
+
+Snapshot-versioned column modifications via `ducklake_column` begin/end_snapshot:
+
+- `ALTER TABLE ADD COLUMN`: inserts new `ducklake_column` row with new `column_id`. Old data files return NULLs for the new column (schema evolution on read). Supports nested types.
+- `ALTER TABLE DROP COLUMN`: sets `end_snapshot` on the column and its children. Old data files retain the dropped column data (ignored on read).
+- `ALTER TABLE RENAME COLUMN`: end-snapshots current row, inserts new row with same `column_id` but new name. Field_id-based column matching in the page source ensures renamed columns map correctly to existing Parquet files.
+
+All operations increment schema version and record `altered_table:<id>` in snapshot changes.
+
 ### Not yet implemented
 
-- `ALTER TABLE` family
+- `ALTER TABLE SET TYPE` (type promotion)
+- `ALTER TABLE ADD/DROP FIELD` (nested struct field manipulation)
 - Commit-failure file cleanup (abort cleanup exists; orphaned files from commit failures are cleaned by DuckLake's `ducklake_delete_orphaned_files()` maintenance procedure)
 - Maintenance operations (optimize, rewrite, expire snapshots, etc.)
 - Unsigned integer range validation for cross-engine writes (DuckLake uint* types mapped to larger signed Trino types; no overflow check when writing back)
+- Concurrency/conflict handling (optimistic commit conflict detection)
 
 ### Test coverage
 
 - All tests use **PostgreSQL** backend (via Testcontainers, requires Docker)
-- DDL: `TestDucklakeDDLIntegration` (12 tests)
+- DDL + ALTER: `TestDucklakeDDLIntegration` (20 tests: 12 DDL + 8 ALTER TABLE)
 - Data writes: `TestDucklakeWriteIntegration` (25 tests, including 6 partitioned write tests), `TestDucklakeWriteFragment` (5 tests), `TestDucklakeStatsExtractor` (12 tests)
 - Row-level mutations: `TestDucklakeDeleteIntegration` (25 tests: 15 DELETE, 5 UPDATE, 5 MERGE)
 - Cross-engine: `TestDucklakeCrossEngineCompatibility` (10 tests, all enabled)
 - Parquet schema: `TestDucklakeParquetSchemaBuilder` (6 tests)
 - Partition computation: `TestDucklakePartitionComputer` (18 tests, both calendar/epoch encodings)
-- Total: 410 tests pass, 0 failures, 7 skipped
+- Total: 418 tests pass, 0 failures, 7 skipped
