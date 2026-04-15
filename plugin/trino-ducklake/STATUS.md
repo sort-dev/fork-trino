@@ -20,7 +20,7 @@ The read path is fully implemented and tested.
 - **Row-group pruning**: Parquet footer statistics checked via `getFilteredRowGroups()`.
 - **Page-level filtering**: Parquet page indexes passed to `ParquetReader` when available.
 - **Dynamic filters**: intersected with file stats domain at page source creation.
-- **Table statistics**: exposed via `ducklake_table_stats` + typed aggregated column min/max for cost-based optimization.
+- **Table statistics**: exposed via `ducklake_table_stats` + typed aggregated column min/max, with conservative guards to prefer unknown over wrong values for delete-file snapshots, mixed inline+Parquet snapshots, and schema-evolved columns with incomplete stats coverage.
 - `applyFilter` planner hook splits predicates into enforced (partition) and unenforced (engine-verified).
 
 ### Type Support
@@ -56,6 +56,27 @@ Trino now supports mixed-mode reads when a snapshot has both active Parquet file
 Stale inlined metadata pointers remain non-fatal. If metadata references an inlined table that is missing or has no active rows at the snapshot, the connector does not fail and does not emit dead inlined splits for mixed Parquet scans.
 
 Schema evolution with inlined data now follows DuckDB behavior: Trino reads across multiple active `ducklake_inlined_data_<table_id>_<schema_version>` tables at a snapshot, instead of selecting a single schema-version table. For evolved schemas, projected columns are mapped by `column_id` and missing fields from older inline tables are returned as `NULL`.
+
+### Statistics resilience
+Stats policy is now intentionally conservative ("don't be wrong"):
+
+- Snapshots with delete files return unknown table/column stats.
+- Snapshots with mixed inline + Parquet rows keep row count but suppress file-derived column stats.
+- For schema-evolved columns where file-level `value_count + null_count` does not cover all active data-file rows, column stats are suppressed.
+
+Decision (2026-04-15):
+
+- Keep strict invalidation instead of `% changed > N` heuristics. Cross-engine delete semantics and stale metadata can make threshold-based stats unsafe.
+- Keep this strict mode as the default safety behavior.
+
+Learning from Iceberg-style behavior:
+
+- Engines can keep stale manifest/file-derived stats after row-level deletes and rely on maintenance (`OPTIMIZE`) or `ANALYZE` to refresh.
+- For Ducklake interoperability, we prefer unknown over potentially wrong stats at read time.
+
+Planned follow-up:
+
+- Add explicit stats recomputation utilities (`recalc stats`) that rescan data and write refreshed stats into Ducklake catalog tables (PostgreSQL backend), decoupled from rewrite/merge operations.
 
 ### Degraded type semantics
 `json`, `variant`, and geometry types are stored as VARCHAR/VARBINARY. No type-specific functions or operators. Variant shredding is not implemented.

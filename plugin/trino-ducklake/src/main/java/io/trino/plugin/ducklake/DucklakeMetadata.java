@@ -78,10 +78,12 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -360,6 +362,15 @@ public class DucklakeMetadata
         }
 
         DucklakeTableHandle table = (DucklakeTableHandle) tableHandle;
+        List<DucklakeDataFile> dataFiles = catalog.getDataFiles(table.tableId(), table.snapshotId());
+        boolean hasDeleteFiles = dataFiles.stream().anyMatch(dataFile -> dataFile.deleteFilePath().isPresent());
+        if (hasDeleteFiles) {
+            // Conservative mode: delete-file snapshots can make row-level table stats stale across engines.
+            // Prefer unknown over wrong.
+            return TableStatistics.empty();
+        }
+
+        boolean hasLiveInlinedRows = hasLiveInlinedRows(table);
 
         Optional<DucklakeTableStats> tableStats = catalog.getTableStats(table.tableId());
         long recordCount;
@@ -383,6 +394,20 @@ public class DucklakeMetadata
 
         Map<String, ColumnHandle> columnHandles = getColumnHandles(session, tableHandle);
 
+        if (hasLiveInlinedRows) {
+            // Conservative mode: when mixed inlined rows are present, file-level column statistics
+            // cover only the Parquet portion and can become misleading. Keep only row-count stats.
+            return stats.build();
+        }
+
+        Set<Long> seenDataFileIds = new HashSet<>();
+        long activeDataFileRowCount = 0;
+        for (DucklakeDataFile dataFile : dataFiles) {
+            if (seenDataFileIds.add(dataFile.dataFileId())) {
+                activeDataFileRowCount += dataFile.recordCount();
+            }
+        }
+
         // Build column type map for typed min/max comparison
         Map<Long, String> columnTypes = catalog.getTableColumns(table.tableId(), table.snapshotId()).stream()
                 .collect(toImmutableMap(DucklakeColumn::columnId, DucklakeColumn::columnType));
@@ -402,6 +427,11 @@ public class DucklakeMetadata
             ColumnStatistics.Builder colBuilder = ColumnStatistics.builder();
 
             long totalCount = colStats.totalValueCount() + colStats.totalNullCount();
+            if (activeDataFileRowCount > 0 && totalCount != activeDataFileRowCount) {
+                // If file-level stats for this column do not cover all active data-file rows
+                // (e.g., column added via schema evolution), expose unknown instead of wrong.
+                continue;
+            }
             if (totalCount > 0) {
                 colBuilder.setNullsFraction(Estimate.of((double) colStats.totalNullCount() / totalCount));
             }
@@ -416,6 +446,12 @@ public class DucklakeMetadata
         }
 
         return stats.build();
+    }
+
+    private boolean hasLiveInlinedRows(DucklakeTableHandle table)
+    {
+        return catalog.getInlinedDataInfos(table.tableId(), table.snapshotId()).stream()
+                .anyMatch(info -> catalog.hasInlinedRows(info.tableId(), info.schemaVersion(), table.snapshotId()));
     }
 
     private OptionalLong getFallbackRecordCount(DucklakeTableHandle table)

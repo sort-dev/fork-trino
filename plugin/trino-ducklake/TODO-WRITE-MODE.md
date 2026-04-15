@@ -1,6 +1,6 @@
 # DuckLake Write Mode Plan (Trino Connector)
 
-Last updated: 2026-04-11
+Last updated: 2026-04-15
 
 ## Objective
 
@@ -105,12 +105,19 @@ Still deferred for views:
 - [x] `ALTER TABLE DROP COLUMN` with end-snapshot on column and children.
 - [x] `ALTER TABLE RENAME COLUMN` with column_id-preserving rename (new ducklake_column row, same column_id).
 - [x] Field_id-based column matching in page source for schema evolution (handles renames across data files).
-- [ ] Schema evolution metadata alignment (`ducklake_schema_versions`, stats resilience).
+- [x] Inlined schema-evolution read alignment: read all live inlined schema-version tables at snapshot, remap by `column_id`, and preserve old inline rows after `ALTER TABLE`.
+- [x] Conservative stats resilience guards ("don't be wrong"): unknown stats for delete-file snapshots, suppress column stats for mixed inline+Parquet, and suppress schema-evolved columns with incomplete coverage.
+- [x] Decision: keep strict stats invalidation (no `% changed > N` heuristic) as default for cross-engine safety.
+- [ ] Schema evolution metadata alignment (`ducklake_schema_versions`).
 - [ ] Concurrency/conflict handling (optimistic commit conflict detection using snapshot lineage and changes).
 - [ ] Performance pass (writer scaling, file size tuning, stats cost).
 
 ### M8: Maintenance Operations (Post-v1)
 
+- [ ] Add stats maintenance utilities:
+  - `recalc stats` procedure(s) to rescan active data files and recompute table/column stats into catalog metadata.
+  - Keep this decoupled from rewrite/merge; callable independently as maintenance.
+  - Add regression tests for recompute-after-delete and recompute-after-schema-evolution snapshots.
 - [ ] Add maintenance verbs that map cleanly to Trino conventions:
   - `ALTER TABLE ... EXECUTE optimize` (DuckDB `merge_adjacent_files` equivalent)
   - `ALTER TABLE ... EXECUTE rewrite_data_files`
@@ -159,7 +166,7 @@ See [REPORT_CROSS_ENGINE_WRITE.md](REPORT_CROSS_ENGINE_WRITE.md) for spec issues
 
 - `TestDucklakeWriteIntegration` (25 tests): DDL/DML correctness for unpartitioned and partitioned tables
 - `TestDucklakeDeleteIntegration` (25 tests): DELETE (15), UPDATE (5), MERGE (5) — row-level mutations
-- `TestDucklakeCrossEngineCompatibility` (10 tests): Trino writes -> DuckDB reads round-trips
+- `TestDucklakeCrossEngineCompatibility`: Trino writes -> DuckDB reads round-trips, including inlined schema-evolution parity (`4/4` and `9/9` around `ALTER`)
 - `TestDucklakeParquetSchemaBuilder` (6 tests): Parquet field_id assignment
 - `TestDucklakePartitionComputer` (18 tests): partition value computation, both encodings
 - `TestDucklakeWriteFragment` (5 tests): fragment JSON serialization

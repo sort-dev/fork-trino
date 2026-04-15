@@ -432,6 +432,65 @@ public class TestDucklakeCatalog
     }
 
     @Test
+    public void testGetTableStatisticsSuppressesColumnStatsForMixedInlineAndParquet()
+    {
+        long snapshotId = catalog.getCurrentSnapshotId();
+        DucklakeTable table = getTable("test_schema", "mixed_inline_table", snapshotId);
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "mixed_inline_table", table.tableId(), snapshotId);
+
+        DucklakeTypeConverter typeConverter = new DucklakeTypeConverter(
+                io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER);
+        DucklakeMetadata metadata = new DucklakeMetadata(catalog, typeConverter);
+        io.trino.spi.statistics.TableStatistics stats = metadata.getTableStatistics(
+                io.trino.testing.connector.TestingConnectorSession.SESSION, tableHandle);
+
+        assertThat(stats.getRowCount().getValue()).isEqualTo(7.0);
+        assertThat(stats.getColumnStatistics()).isEmpty();
+    }
+
+    @Test
+    public void testGetTableStatisticsSuppressesColumnStatsWhenDeleteFilesPresent()
+    {
+        long snapshotId = catalog.getCurrentSnapshotId();
+        DucklakeTable table = getTable("test_schema", "deleted_rows_table", snapshotId);
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "deleted_rows_table", table.tableId(), snapshotId);
+
+        DucklakeTypeConverter typeConverter = new DucklakeTypeConverter(
+                io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER);
+        DucklakeMetadata metadata = new DucklakeMetadata(catalog, typeConverter);
+        io.trino.spi.statistics.TableStatistics stats = metadata.getTableStatistics(
+                io.trino.testing.connector.TestingConnectorSession.SESSION, tableHandle);
+
+        assertThat(stats.getRowCount().isUnknown()).isTrue();
+        assertThat(stats.getColumnStatistics()).isEmpty();
+    }
+
+    @Test
+    public void testGetTableStatisticsSkipsColumnsWithIncompleteCoverageAfterSchemaEvolution()
+    {
+        long snapshotId = catalog.getCurrentSnapshotId();
+        DucklakeTable table = getTable("test_schema", "schema_evolution_table", snapshotId);
+        DucklakeTableHandle tableHandle = new DucklakeTableHandle(
+                "test_schema", "schema_evolution_table", table.tableId(), snapshotId);
+
+        DucklakeTypeConverter typeConverter = new DucklakeTypeConverter(
+                io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER);
+        DucklakeMetadata metadata = new DucklakeMetadata(catalog, typeConverter);
+        io.trino.spi.statistics.TableStatistics stats = metadata.getTableStatistics(
+                io.trino.testing.connector.TestingConnectorSession.SESSION, tableHandle);
+
+        assertThat(stats.getRowCount().getValue()).isEqualTo(4.0);
+
+        Map<String, ColumnHandle> handles = metadata.getColumnHandles(
+                io.trino.testing.connector.TestingConnectorSession.SESSION,
+                tableHandle);
+        assertThat(stats.getColumnStatistics()).containsKey(handles.get("id"));
+        assertThat(stats.getColumnStatistics()).doesNotContainKey(handles.get("added_col"));
+    }
+
+    @Test
     public void testGetTableHandleUsesStartVersionWhenEndVersionMissing()
     {
         long historicalSnapshotId = getSchemaEvolutionHistoricalSnapshotId();
