@@ -1,6 +1,6 @@
 # DuckLake Read Mode Plan (Trino Connector)
 
-Last updated: 2026-04-05
+Last updated: 2026-04-15
 
 ## Objective
 
@@ -27,7 +27,7 @@ Define and implement a Trino-native read surface for DuckLake that supports:
   - Parquet row-group pruning
   - dynamic filtering intersection
   - delete-file merge-on-read
-  - inlined data read path for no-parquet case
+  - inlined data read path for no-parquet case, including multi-schema-version inlined tables after schema evolution
 - Row-group pruning remains base-column/statistics driven; connector does not map transformed predicates like `year(ts)` onto base Parquet stats directly.
 - DuckLake session properties now expose optional snapshot pinning (`read_snapshot_id`, `read_snapshot_timestamp`).
 
@@ -38,6 +38,8 @@ Define and implement a Trino-native read surface for DuckLake that supports:
   - Current behavior: catch `SQLException`, return empty, continue safely.
 - Inlined + Parquet mixed state:
   - Implemented: split generation emits both Parquet and inlined splits when both are active in the same snapshot.
+- Inlined schema evolution fanout:
+  - Implemented: split generation includes all live inlined schema-version tables for the snapshot, and reads remap projected columns by `column_id` with `NULL` fill for missing fields.
 - Temporal partition encoding ambiguity:
   - Docs and observed behavior differ.
   - Current read path assumes DuckDB calendar semantics for temporal transforms (`year=2023`, `month=6`, `day=15`, `hour=0..23`).
@@ -120,6 +122,8 @@ Same precedence rule: query `AS OF` > session pin > catalog pin > current snapsh
 - [x] Preserve correctness with delete filtering and row-id semantics.
 - [x] Add regression tests for mixed-state snapshots (inlined rows + data files simultaneously visible).
 - [x] Keep fallback behavior for stale inlined pointers (missing `ducklake_inlined_data_*` table) as non-fatal.
+- [x] Read across multiple inlined schema-version tables after `ALTER TABLE` schema evolution (DuckDB parity).
+- [x] Add cross-engine regressions for `4 inline -> ALTER -> 4 inline` and `9 inline -> ALTER -> 9 inline` (no forced flush on alter; Trino matches DuckDB rows).
 
 ## R2: Table Version Support
 

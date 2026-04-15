@@ -22,6 +22,7 @@ import io.airlift.slice.Slice;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeColumnStats;
+import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
 import io.trino.plugin.ducklake.catalog.DucklakeInlinedDataInfo;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionField;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionSpec;
@@ -32,9 +33,6 @@ import io.trino.plugin.ducklake.catalog.DucklakeView;
 import io.trino.plugin.ducklake.catalog.PartitionFieldSpec;
 import io.trino.plugin.ducklake.catalog.TableColumnSpec;
 import io.trino.spi.TrinoException;
-import io.trino.spi.connector.ColumnHandle;
-import io.trino.spi.connector.ColumnMetadata;
-import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ColumnPosition;
@@ -429,8 +427,8 @@ public class DucklakeMetadata
             return OptionalLong.empty();
         }
 
-        Optional<DucklakeInlinedDataInfo> inlinedInfo = catalog.getInlinedDataInfo(table.tableId(), table.snapshotId());
-        if (inlinedInfo.isEmpty()) {
+        List<DucklakeInlinedDataInfo> inlinedInfos = catalog.getInlinedDataInfos(table.tableId(), table.snapshotId());
+        if (inlinedInfos.isEmpty()) {
             return OptionalLong.of(0);
         }
 
@@ -439,11 +437,13 @@ public class DucklakeMetadata
             return OptionalLong.of(0);
         }
 
-        long inlinedRowCount = catalog.readInlinedData(
-                table.tableId(),
-                inlinedInfo.get().schemaVersion(),
-                table.snapshotId(),
-                ImmutableList.of(tableColumns.getFirst())).size();
+        long inlinedRowCount = inlinedInfos.stream()
+                .mapToLong(info -> catalog.readInlinedData(
+                        info.tableId(),
+                        info.schemaVersion(),
+                        table.snapshotId(),
+                        ImmutableList.of(tableColumns.getFirst())).size())
+                .sum();
         return OptionalLong.of(inlinedRowCount);
     }
 

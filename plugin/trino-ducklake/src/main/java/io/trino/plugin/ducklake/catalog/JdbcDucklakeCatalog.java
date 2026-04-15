@@ -762,17 +762,23 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public Optional<DucklakeInlinedDataInfo> getInlinedDataInfo(long tableId, long snapshotId)
+    public List<DucklakeInlinedDataInfo> getInlinedDataInfos(long tableId, long snapshotId)
     {
-        // First check if this table has inlined data
-        String sql = "SELECT table_id, table_name, schema_version FROM ducklake_inlined_data_tables WHERE table_id = ?";
+        // A table can have multiple inlined data tables (one per schema version).
+        String sql = "SELECT table_id, table_name, schema_version " +
+                "FROM ducklake_inlined_data_tables " +
+                "WHERE table_id = ? " +
+                "  AND schema_version <= (SELECT schema_version FROM ducklake_snapshot WHERE snapshot_id = ?) " +
+                "ORDER BY schema_version";
 
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setLong(1, tableId);
+            stmt.setLong(2, snapshotId);
 
             try (ResultSet rs = stmt.executeQuery()) {
-                if (rs.next()) {
+                List<DucklakeInlinedDataInfo> infos = new ArrayList<>();
+                while (rs.next()) {
                     long resolvedTableId = rs.getLong("table_id");
                     long schemaVersion = rs.getLong("schema_version");
                     String inlinedTableName = String.format("ducklake_inlined_data_%d_%d", resolvedTableId, schemaVersion);
@@ -783,38 +789,30 @@ public class JdbcDucklakeCatalog
                         // Catalog metadata can point to a dropped/non-materialized inlined table.
                         // Treat this as "no inlined data" so scan planning does not emit a dead split.
                         log.debug("Inlined data table %s not available for table %d: %s", inlinedTableName, tableId, e.getMessage());
-                        return Optional.empty();
+                        continue;
                     }
 
-                    return Optional.of(new DucklakeInlinedDataInfo(
+                    infos.add(new DucklakeInlinedDataInfo(
                             resolvedTableId,
                             rs.getString("table_name"),
                             schemaVersion));
                 }
-                return Optional.empty();
+                return infos;
             }
         }
         catch (SQLException e) {
             // ducklake_inlined_data_tables may not exist in catalogs that never used inlining
             log.debug("Could not query inlined data tables (table may not exist): %s", e.getMessage());
-            return Optional.empty();
+            return List.of();
         }
     }
 
     @Override
-    public List<List<Object>> readInlinedData(long tableId, long schemaVersion, long snapshotId, List<DucklakeColumn> columns)
+    public boolean hasInlinedRows(long tableId, long schemaVersion, long snapshotId)
     {
         String inlinedTableName = String.format("ducklake_inlined_data_%d_%d", tableId, schemaVersion);
-
-        String columnNames = columns.stream()
-                .map(DucklakeColumn::columnName)
-                .collect(Collectors.joining(", "));
-
-        String sql = String.format(
-                "SELECT %s FROM %s WHERE ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL) ORDER BY row_id",
-                columnNames, inlinedTableName);
-
-        List<List<Object>> rows = new ArrayList<>();
+        String sql = "SELECT 1 FROM " + quoteIdentifier(inlinedTableName) +
+                " WHERE ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL) LIMIT 1";
 
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement stmt = conn.prepareStatement(sql)) {
@@ -822,13 +820,64 @@ public class JdbcDucklakeCatalog
             stmt.setLong(2, snapshotId);
 
             try (ResultSet rs = stmt.executeQuery()) {
-                int columnCount = columns.size();
-                while (rs.next()) {
-                    List<Object> row = new ArrayList<>(columnCount);
-                    for (int i = 1; i <= columnCount; i++) {
-                        row.add(rs.getObject(i));
+                return rs.next();
+            }
+        }
+        catch (SQLException e) {
+            log.debug("Could not probe inlined data rows from %s (table may not exist): %s", inlinedTableName, e.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public List<List<Object>> readInlinedData(long tableId, long schemaVersion, long snapshotId, List<DucklakeColumn> columns)
+    {
+        if (columns.isEmpty()) {
+            return List.of();
+        }
+
+        String inlinedTableName = String.format("ducklake_inlined_data_%d_%d", tableId, schemaVersion);
+
+        List<List<Object>> rows = new ArrayList<>();
+
+        try (Connection conn = dataSource.getConnection()) {
+            OptionalLong sourceSchemaSnapshot = getSnapshotIdForSchemaVersion(conn, schemaVersion, snapshotId);
+            if (sourceSchemaSnapshot.isEmpty()) {
+                return List.of();
+            }
+
+            Map<Long, DucklakeColumn> sourceColumnsById = getTableColumns(tableId, sourceSchemaSnapshot.getAsLong()).stream()
+                    .collect(Collectors.toMap(DucklakeColumn::columnId, column -> column));
+
+            List<String> projectedExpressions = new ArrayList<>(columns.size());
+            for (int index = 0; index < columns.size(); index++) {
+                DucklakeColumn requestedColumn = columns.get(index);
+                String alias = "c" + index;
+                DucklakeColumn sourceColumn = sourceColumnsById.get(requestedColumn.columnId());
+                if (sourceColumn == null) {
+                    projectedExpressions.add("NULL AS " + quoteIdentifier(alias));
+                    continue;
+                }
+                projectedExpressions.add(quoteIdentifier(sourceColumn.columnName()) + " AS " + quoteIdentifier(alias));
+            }
+
+            String sql = String.format(
+                    "SELECT %s FROM %s WHERE ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL) ORDER BY row_id",
+                    String.join(", ", projectedExpressions),
+                    quoteIdentifier(inlinedTableName));
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                stmt.setLong(1, snapshotId);
+                stmt.setLong(2, snapshotId);
+
+                try (ResultSet rs = stmt.executeQuery()) {
+                    int columnCount = columns.size();
+                    while (rs.next()) {
+                        List<Object> row = new ArrayList<>(columnCount);
+                        for (int i = 1; i <= columnCount; i++) {
+                            row.add(rs.getObject(i));
+                        }
+                        rows.add(row);
                     }
-                    rows.add(row);
                 }
             }
         }
@@ -840,6 +889,28 @@ public class JdbcDucklakeCatalog
         }
 
         return rows;
+    }
+
+    private OptionalLong getSnapshotIdForSchemaVersion(Connection conn, long schemaVersion, long snapshotId)
+            throws SQLException
+    {
+        String sql = "SELECT snapshot_id FROM ducklake_snapshot " +
+                "WHERE schema_version = ? AND snapshot_id <= ? ORDER BY snapshot_id DESC LIMIT 1";
+        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setLong(1, schemaVersion);
+            stmt.setLong(2, snapshotId);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return OptionalLong.of(rs.getLong("snapshot_id"));
+                }
+                return OptionalLong.empty();
+            }
+        }
+    }
+
+    private static String quoteIdentifier(String identifier)
+    {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
     @Override

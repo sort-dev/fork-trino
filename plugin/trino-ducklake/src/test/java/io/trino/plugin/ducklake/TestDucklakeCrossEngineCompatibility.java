@@ -24,10 +24,13 @@ import org.junit.jupiter.api.parallel.ExecutionMode;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
@@ -370,6 +373,192 @@ public class TestDucklakeCrossEngineCompatibility
         }
     }
 
+    @Test
+    public void testDuckdbInlineAlterThenInlineMatchesTrino()
+            throws Exception
+    {
+        String tableName = "xengine_inline_alter_inline";
+        String fullDuckdbTable = "ducklake_db.test_schema." + tableName;
+        String fullTrinoTable = "test_schema." + tableName;
+
+        try {
+            try (Connection duckConn = createDuckdbConnection();
+                    Statement duckStmt = duckConn.createStatement()) {
+                duckStmt.execute("DROP TABLE IF EXISTS " + fullDuckdbTable);
+                duckStmt.execute("CREATE TABLE " + fullDuckdbTable + " (id INTEGER, name VARCHAR)");
+                duckStmt.execute("CALL ducklake_db.set_option('data_inlining_row_limit', 10, schema => 'test_schema', table_name => '" + tableName + "')");
+                duckStmt.execute("INSERT INTO " + fullDuckdbTable + " VALUES (1, 'pre_1'), (2, 'pre_2'), (3, 'pre_3'), (4, 'pre_4')");
+                duckStmt.execute("ALTER TABLE " + fullDuckdbTable + " ADD COLUMN score INTEGER");
+                duckStmt.execute("INSERT INTO " + fullDuckdbTable + " VALUES (5, 'post_1', 50), (6, 'post_2', 60), (7, 'post_3', 70), (8, 'post_4', 80)");
+            }
+
+            List<String> duckdbRows;
+            try (Connection duckConn = createDuckdbConnection();
+                    Statement duckStmt = duckConn.createStatement();
+                    ResultSet rs = duckStmt.executeQuery("SELECT id, name, score FROM " + fullDuckdbTable + " ORDER BY id")) {
+                duckdbRows = new ArrayList<>();
+                while (rs.next()) {
+                    duckdbRows.add(formatRow(rs.getObject(1), rs.getObject(2), rs.getObject(3)));
+                }
+            }
+
+            assertThat(duckdbRows).containsExactly(
+                    "1|pre_1|null",
+                    "2|pre_2|null",
+                    "3|pre_3|null",
+                    "4|pre_4|null",
+                    "5|post_1|50",
+                    "6|post_2|60",
+                    "7|post_3|70",
+                    "8|post_4|80");
+
+            DucklakeCatalogGenerator.IsolatedCatalog catalog = getIsolatedCatalog();
+            try (Connection pgConn = DriverManager.getConnection(catalog.jdbcUrl(), catalog.user(), catalog.password())) {
+                long snapshotId = queryLong(pgConn, "SELECT max(snapshot_id) FROM ducklake_snapshot");
+                long tableId = queryLong(pgConn,
+                        "SELECT table_id FROM ducklake_table WHERE table_name = ? AND end_snapshot IS NULL",
+                        tableName);
+
+                long activeDataFileCount = queryLong(pgConn,
+                        "SELECT count(*) FROM ducklake_data_file WHERE table_id = ? AND end_snapshot IS NULL",
+                        tableId);
+
+                Map<Long, Long> activeInlineRowsBySchemaVersion = new LinkedHashMap<>();
+                try (PreparedStatement stmt = pgConn.prepareStatement(
+                        "SELECT schema_version FROM ducklake_inlined_data_tables WHERE table_id = ? ORDER BY schema_version")) {
+                    stmt.setLong(1, tableId);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            long schemaVersion = rs.getLong("schema_version");
+                            long activeRows = queryLong(pgConn,
+                                    "SELECT count(*) FROM ducklake_inlined_data_" + tableId + "_" + schemaVersion +
+                                            " WHERE ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)",
+                                    snapshotId,
+                                    snapshotId);
+                            activeInlineRowsBySchemaVersion.put(schemaVersion, activeRows);
+                        }
+                    }
+                }
+
+                long totalActiveInlineRows = activeInlineRowsBySchemaVersion.values().stream()
+                        .mapToLong(Long::longValue)
+                        .sum();
+
+                // With 4 + 4 rows and limit 10, DuckDB should keep rows in metadata inlined tables.
+                assertThat(activeDataFileCount)
+                        .as("DuckDB active Parquet data files after inline->alter->inline")
+                        .isZero();
+                assertThat(activeInlineRowsBySchemaVersion.size())
+                        .as("DuckDB inlined schema-version tables after ADD COLUMN")
+                        .isGreaterThanOrEqualTo(2);
+                assertThat(totalActiveInlineRows)
+                        .as("DuckDB active inlined rows across schema versions")
+                        .isEqualTo(8);
+            }
+
+            MaterializedResult trinoResult = computeActual("SELECT id, name, score FROM " + fullTrinoTable + " ORDER BY id");
+            List<String> trinoRows = trinoResult.getMaterializedRows().stream()
+                    .map(row -> formatRow(row.getField(0), row.getField(1), row.getField(2)))
+                    .toList();
+
+            assertThat(trinoRows).isEqualTo(duckdbRows);
+        }
+        finally {
+            tryDropTable(fullTrinoTable);
+        }
+    }
+
+    @Test
+    public void testDuckdbNineAlterNineStaysInlinedAndMatchesTrino()
+            throws Exception
+    {
+        String tableName = "xengine_inline9_alter_inline9";
+        String fullDuckdbTable = "ducklake_db.test_schema." + tableName;
+        String fullTrinoTable = "test_schema." + tableName;
+
+        try {
+            try (Connection duckConn = createDuckdbConnection();
+                    Statement duckStmt = duckConn.createStatement()) {
+                duckStmt.execute("DROP TABLE IF EXISTS " + fullDuckdbTable);
+                duckStmt.execute("CREATE TABLE " + fullDuckdbTable + " (id INTEGER, name VARCHAR)");
+                duckStmt.execute("CALL ducklake_db.set_option('data_inlining_row_limit', 10, schema => 'test_schema', table_name => '" + tableName + "')");
+                duckStmt.execute("INSERT INTO " + fullDuckdbTable + " VALUES " + buildInlineValues(1, 9, false));
+                duckStmt.execute("ALTER TABLE " + fullDuckdbTable + " ADD COLUMN score INTEGER");
+                duckStmt.execute("INSERT INTO " + fullDuckdbTable + " VALUES " + buildInlineValues(10, 18, true));
+            }
+
+            List<String> duckdbRows;
+            try (Connection duckConn = createDuckdbConnection();
+                    Statement duckStmt = duckConn.createStatement();
+                    ResultSet rs = duckStmt.executeQuery("SELECT id, name, score FROM " + fullDuckdbTable + " ORDER BY id")) {
+                duckdbRows = new ArrayList<>();
+                while (rs.next()) {
+                    duckdbRows.add(formatRow(rs.getObject(1), rs.getObject(2), rs.getObject(3)));
+                }
+            }
+
+            assertThat(duckdbRows).hasSize(18);
+            assertThat(duckdbRows.getFirst()).isEqualTo("1|pre_1|null");
+            assertThat(duckdbRows.get(8)).isEqualTo("9|pre_9|null");
+            assertThat(duckdbRows.get(9)).isEqualTo("10|post_10|100");
+            assertThat(duckdbRows.getLast()).isEqualTo("18|post_18|180");
+
+            DucklakeCatalogGenerator.IsolatedCatalog catalog = getIsolatedCatalog();
+            try (Connection pgConn = DriverManager.getConnection(catalog.jdbcUrl(), catalog.user(), catalog.password())) {
+                long snapshotId = queryLong(pgConn, "SELECT max(snapshot_id) FROM ducklake_snapshot");
+                long tableId = queryLong(pgConn,
+                        "SELECT table_id FROM ducklake_table WHERE table_name = ? AND end_snapshot IS NULL",
+                        tableName);
+
+                long activeDataFileCount = queryLong(pgConn,
+                        "SELECT count(*) FROM ducklake_data_file WHERE table_id = ? AND end_snapshot IS NULL",
+                        tableId);
+
+                Map<Long, Long> activeInlineRowsBySchemaVersion = new LinkedHashMap<>();
+                try (PreparedStatement stmt = pgConn.prepareStatement(
+                        "SELECT schema_version FROM ducklake_inlined_data_tables WHERE table_id = ? ORDER BY schema_version")) {
+                    stmt.setLong(1, tableId);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        while (rs.next()) {
+                            long schemaVersion = rs.getLong("schema_version");
+                            long activeRows = queryLong(pgConn,
+                                    "SELECT count(*) FROM ducklake_inlined_data_" + tableId + "_" + schemaVersion +
+                                            " WHERE ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)",
+                                    snapshotId,
+                                    snapshotId);
+                            activeInlineRowsBySchemaVersion.put(schemaVersion, activeRows);
+                        }
+                    }
+                }
+
+                long totalActiveInlineRows = activeInlineRowsBySchemaVersion.values().stream()
+                        .mapToLong(Long::longValue)
+                        .sum();
+
+                // Even with 9 + 9 rows around ALTER, DuckDB keeps rows in inlined metadata tables.
+                assertThat(activeDataFileCount)
+                        .as("DuckDB active Parquet data files after inline9->alter->inline9")
+                        .isZero();
+                assertThat(activeInlineRowsBySchemaVersion.size())
+                        .as("DuckDB inlined schema-version tables after ADD COLUMN")
+                        .isGreaterThanOrEqualTo(2);
+                assertThat(totalActiveInlineRows)
+                        .as("DuckDB active inlined rows across schema versions")
+                        .isEqualTo(18);
+            }
+
+            MaterializedResult trinoResult = computeActual("SELECT id, name, score FROM " + fullTrinoTable + " ORDER BY id");
+            List<String> trinoRows = trinoResult.getMaterializedRows().stream()
+                    .map(row -> formatRow(row.getField(0), row.getField(1), row.getField(2)))
+                    .toList();
+
+            assertThat(trinoRows).isEqualTo(duckdbRows);
+        }
+        finally {
+            tryDropTable(fullTrinoTable);
+        }
+    }
+
     // ==================== Helpers ====================
 
     private void tryDropTable(String tableName)
@@ -379,5 +568,50 @@ public class TestDucklakeCrossEngineCompatibility
         }
         catch (Exception ignored) {
         }
+    }
+
+    private static long queryLong(Connection conn, String sql, Object... parameters)
+            throws Exception
+    {
+        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            for (int i = 0; i < parameters.length; i++) {
+                Object parameter = parameters[i];
+                if (parameter instanceof String stringValue) {
+                    stmt.setString(i + 1, stringValue);
+                }
+                else if (parameter instanceof Long longValue) {
+                    stmt.setLong(i + 1, longValue);
+                }
+                else {
+                    stmt.setObject(i + 1, parameter);
+                }
+            }
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    throw new IllegalStateException("No rows returned for query: " + sql);
+                }
+                return rs.getLong(1);
+            }
+        }
+    }
+
+    private static String formatRow(Object id, Object name, Object score)
+    {
+        return String.valueOf(id) + "|" + String.valueOf(name) + "|" + String.valueOf(score);
+    }
+
+    private static String buildInlineValues(int startInclusive, int endInclusive, boolean withScore)
+    {
+        List<String> rows = new ArrayList<>();
+        for (int id = startInclusive; id <= endInclusive; id++) {
+            String prefix = withScore ? "post_" : "pre_";
+            if (withScore) {
+                rows.add("(" + id + ", '" + prefix + id + "', " + (id * 10) + ")");
+            }
+            else {
+                rows.add("(" + id + ", '" + prefix + id + "')");
+            }
+        }
+        return String.join(", ", rows);
     }
 }

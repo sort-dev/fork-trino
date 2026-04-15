@@ -18,7 +18,6 @@ import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.airlift.slice.Slices;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
-import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
 import io.trino.plugin.ducklake.catalog.DucklakeFilePartitionValue;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionField;
@@ -114,15 +113,14 @@ public class DucklakeSplitManager
 
         log.debug("Found %d data files for table %s", dataFiles.size(), tableHandle.tableName());
 
-        boolean hasParquetFiles = !dataFiles.isEmpty();
-        Optional<DucklakeInlinedSplit> inlinedSplit = catalog.getInlinedDataInfo(
-                        tableHandle.tableId(), tableHandle.snapshotId())
-                .filter(info -> shouldIncludeInlinedSplit(tableHandle, info.schemaVersion(), hasParquetFiles))
+        List<DucklakeInlinedSplit> inlinedSplits = catalog.getInlinedDataInfos(tableHandle.tableId(), tableHandle.snapshotId()).stream()
+                .filter(info -> catalog.hasInlinedRows(info.tableId(), info.schemaVersion(), tableHandle.snapshotId()))
                 .map(info -> {
                     log.debug("Found inlined data for table %s (tableId=%d, schemaVersion=%d)",
                             tableHandle.tableName(), info.tableId(), info.schemaVersion());
                     return new DucklakeInlinedSplit(info.tableId(), info.schemaVersion(), tableHandle.snapshotId());
-                });
+                })
+                .collect(toImmutableList());
 
         List<DucklakeSplit> parquetSplits = List.of();
         if (!dataFiles.isEmpty()) {
@@ -148,41 +146,22 @@ public class DucklakeSplitManager
                     .collect(toImmutableList());
         }
 
-        if (parquetSplits.isEmpty() && inlinedSplit.isEmpty()) {
+        if (parquetSplits.isEmpty() && inlinedSplits.isEmpty()) {
             log.debug("No data files or inlined data found for table %s", tableHandle.tableName());
             return new FixedSplitSource(List.of());
         }
 
-        List<ConnectorSplit> allSplits = new ArrayList<>(parquetSplits.size() + (inlinedSplit.isPresent() ? 1 : 0));
+        List<ConnectorSplit> allSplits = new ArrayList<>(parquetSplits.size() + inlinedSplits.size());
         allSplits.addAll(parquetSplits);
-        inlinedSplit.ifPresent(allSplits::add);
+        allSplits.addAll(inlinedSplits);
 
         log.debug("Created %d splits for table %s (%d parquet, %d inlined)",
                 allSplits.size(),
                 tableHandle.tableName(),
                 parquetSplits.size(),
-                inlinedSplit.isPresent() ? 1 : 0);
+                inlinedSplits.size());
 
         return new FixedSplitSource(allSplits);
-    }
-
-    private boolean shouldIncludeInlinedSplit(DucklakeTableHandle tableHandle, long schemaVersion, boolean hasParquetFiles)
-    {
-        if (!hasParquetFiles) {
-            return true;
-        }
-
-        List<DucklakeColumn> tableColumns = catalog.getTableColumns(tableHandle.tableId(), tableHandle.snapshotId());
-        if (tableColumns.isEmpty()) {
-            return false;
-        }
-
-        List<List<Object>> probeRows = catalog.readInlinedData(
-                tableHandle.tableId(),
-                schemaVersion,
-                tableHandle.snapshotId(),
-                List.of(tableColumns.getFirst()));
-        return !probeRows.isEmpty();
     }
 
     private List<DucklakeDataFile> pruneDataFiles(List<DucklakeDataFile> dataFiles, DucklakeTableHandle tableHandle, Constraint constraint)

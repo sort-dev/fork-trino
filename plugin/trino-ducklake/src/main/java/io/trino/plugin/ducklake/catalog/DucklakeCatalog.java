@@ -121,10 +121,15 @@ public interface DucklakeCatalog
     Map<Long, List<DucklakeFilePartitionValue>> getFilePartitionValues(long tableId, long snapshotId);
 
     /**
-     * Check if a table has inlined data at the given snapshot.
-     * Queries ducklake_inlined_data_tables for the table_id and resolves the schema version.
+     * List inlined data table descriptors for a table at the given snapshot.
+     * A table can have multiple inlined data tables (one per schema_version).
      */
-    Optional<DucklakeInlinedDataInfo> getInlinedDataInfo(long tableId, long snapshotId);
+    List<DucklakeInlinedDataInfo> getInlinedDataInfos(long tableId, long snapshotId);
+
+    /**
+     * Check if an inlined data table has any live rows at a given snapshot.
+     */
+    boolean hasInlinedRows(long tableId, long schemaVersion, long snapshotId);
 
     /**
      * Read inlined data rows for a table at a given snapshot.

@@ -1,6 +1,6 @@
 # Ducklake Connector Status
 
-Last updated: 2026-04-11
+Last updated: 2026-04-15
 
 ## Read Side — Complete
 
@@ -55,6 +55,8 @@ Trino now supports mixed-mode reads when a snapshot has both active Parquet file
 
 Stale inlined metadata pointers remain non-fatal. If metadata references an inlined table that is missing or has no active rows at the snapshot, the connector does not fail and does not emit dead inlined splits for mixed Parquet scans.
 
+Schema evolution with inlined data now follows DuckDB behavior: Trino reads across multiple active `ducklake_inlined_data_<table_id>_<schema_version>` tables at a snapshot, instead of selecting a single schema-version table. For evolved schemas, projected columns are mapped by `column_id` and missing fields from older inline tables are returned as `NULL`.
+
 ### Degraded type semantics
 `json`, `variant`, and geometry types are stored as VARCHAR/VARBINARY. No type-specific functions or operators. Variant shredding is not implemented.
 
@@ -108,9 +110,10 @@ Parquet files include `field_id` annotations matching DuckLake `column_id` value
 - See [REPORT_CROSS_ENGINE_WRITE.md](REPORT_CROSS_ENGINE_WRITE.md) for open spec issues filed with the DuckDB team
 
 Cross-engine validation (Trino writes -> DuckDB reads, PostgreSQL catalog):
-- All 10 cross-engine tests pass, including full column value round-trips
+- Cross-engine compatibility tests pass, including full column value round-trips
 - Catalog metadata operations: SHOW TABLES, DESCRIBE, row counts all correct
 - Column value reads: DuckDB correctly reads all values from Trino-written Parquet files
+- Inlined schema-evolution parity validated: DuckDB `4 inline -> ALTER ADD COLUMN -> 4 inline` and `9 inline -> ALTER ADD COLUMN -> 9 inline` both remain inlined (no Parquet flush), and Trino returns matching rows.
 
 ### Row-level mutations (DELETE, UPDATE, MERGE)
 
