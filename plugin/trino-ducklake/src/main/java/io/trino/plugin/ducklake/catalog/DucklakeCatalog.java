@@ -169,6 +169,25 @@ public interface DucklakeCatalog
     void dropTable(String schemaName, String tableName);
 
     /**
+     * Add a column to a table. Creates a new ducklake_column row with a new column_id.
+     * Increments schema version. Creates a new snapshot atomically.
+     */
+    void addColumn(long tableId, String schemaName, String tableName, TableColumnSpec column);
+
+    /**
+     * Drop a column from a table. Sets end_snapshot on the column's current row.
+     * Increments schema version. Creates a new snapshot atomically.
+     */
+    void dropColumn(long tableId, String schemaName, String tableName, long columnId);
+
+    /**
+     * Rename a column. End-snapshots the current column row and inserts a new row
+     * with the same column_id but updated column_name.
+     * Increments schema version. Creates a new snapshot atomically.
+     */
+    void renameColumn(long tableId, String schemaName, String tableName, long columnId, String newName);
+
+    /**
      * Commit inserted data files to a table.
      * Creates a new snapshot with data file rows, file column stats,
      * and updated table stats.

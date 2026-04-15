@@ -71,6 +71,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -425,12 +426,27 @@ public class DucklakePageSourceProvider
             TransformConnectorPageSource.Builder transforms = TransformConnectorPageSource.builder();
             int parquetColumnOrdinal = 0;
 
+            // Build field_id → ColumnIO index for field_id-based column matching (schema evolution: renames)
+            Map<Integer, ColumnIO> fieldIdToColumnIO = new HashMap<>();
+            for (org.apache.parquet.schema.Type field : fileSchema.getFields()) {
+                if (field.getId() != null) {
+                    ColumnIO childIO = messageColumnIO.getChild(field.getName());
+                    if (childIO != null) {
+                        fieldIdToColumnIO.put(field.getId().intValue(), childIO);
+                    }
+                }
+            }
+
             for (DucklakeColumnHandle column : fileColumns) {
                 String columnName = column.columnName();
+                // Try name-based match first, then fall back to field_id match (handles column renames)
                 ColumnIO columnIO = messageColumnIO.getChild(columnName);
+                if (columnIO == null && column.columnId() > 0) {
+                    columnIO = fieldIdToColumnIO.get((int) column.columnId());
+                }
 
                 if (columnIO == null) {
-                    // Missing column in file — return nulls (schema evolution)
+                    // Missing column in file — return nulls (schema evolution: new column added after file was written)
                     transforms.constantValue(column.columnType().createNullBlock());
                     continue;
                 }

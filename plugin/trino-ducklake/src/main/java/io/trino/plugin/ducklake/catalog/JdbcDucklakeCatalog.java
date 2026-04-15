@@ -1285,6 +1285,109 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
+    public void addColumn(long tableId, String schemaName, String tableName, TableColumnSpec column)
+    {
+        executeWriteTransaction("add column to " + schemaName + "." + tableName, tx -> {
+            // Find the current max column_order for top-level columns
+            long maxOrder = 0;
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "SELECT COALESCE(MAX(column_order), 0) FROM ducklake_column " +
+                            "WHERE table_id = ? AND parent_column IS NULL " +
+                            "AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                stmt.setLong(1, tableId);
+                stmt.setLong(2, tx.getCurrentSnapshotId());
+                stmt.setLong(3, tx.getCurrentSnapshotId());
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (rs.next()) {
+                        maxOrder = rs.getLong(1);
+                    }
+                }
+            }
+
+            insertColumnTree(tx, tableId, column, maxOrder + 1, OptionalLong.empty());
+            tx.incrementSchemaVersion(tableId);
+            tx.addChange("altered_table:" + tableId);
+        });
+    }
+
+    @Override
+    public void dropColumn(long tableId, String schemaName, String tableName, long columnId)
+    {
+        executeWriteTransaction("drop column from " + schemaName + "." + tableName, tx -> {
+            // End-snapshot the column and all its children (for nested types)
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_column SET end_snapshot = ? " +
+                            "WHERE table_id = ? AND (column_id = ? OR parent_column = ?) AND end_snapshot IS NULL")) {
+                stmt.setLong(1, tx.getNewSnapshotId());
+                stmt.setLong(2, tableId);
+                stmt.setLong(3, columnId);
+                stmt.setLong(4, columnId);
+                stmt.executeUpdate();
+            }
+
+            tx.incrementSchemaVersion(tableId);
+            tx.addChange("altered_table:" + tableId);
+        });
+    }
+
+    @Override
+    public void renameColumn(long tableId, String schemaName, String tableName, long columnId, String newName)
+    {
+        executeWriteTransaction("rename column in " + schemaName + "." + tableName, tx -> {
+            // Read the current column metadata
+            long columnOrder;
+            String columnType;
+            boolean nullsAllowed;
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "SELECT column_order, column_type, nulls_allowed FROM ducklake_column " +
+                            "WHERE table_id = ? AND column_id = ? " +
+                            "AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+                stmt.setLong(1, tableId);
+                stmt.setLong(2, columnId);
+                stmt.setLong(3, tx.getCurrentSnapshotId());
+                stmt.setLong(4, tx.getCurrentSnapshotId());
+                try (ResultSet rs = stmt.executeQuery()) {
+                    if (!rs.next()) {
+                        throw new RuntimeException("Column not found: " + columnId);
+                    }
+                    columnOrder = rs.getLong("column_order");
+                    columnType = rs.getString("column_type");
+                    nullsAllowed = rs.getBoolean("nulls_allowed");
+                }
+            }
+
+            // End-snapshot the current version
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_column SET end_snapshot = ? " +
+                            "WHERE table_id = ? AND column_id = ? AND end_snapshot IS NULL AND parent_column IS NULL")) {
+                stmt.setLong(1, tx.getNewSnapshotId());
+                stmt.setLong(2, tableId);
+                stmt.setLong(3, columnId);
+                stmt.executeUpdate();
+            }
+
+            // Insert new version with same column_id but new name
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "INSERT INTO ducklake_column (column_id, begin_snapshot, end_snapshot, table_id, column_order, " +
+                            "column_name, column_type, initial_default, default_value, nulls_allowed, parent_column, " +
+                            "default_value_type, default_value_dialect) " +
+                            "VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, 'NULL', ?, NULL, 'literal', 'duckdb')")) {
+                stmt.setLong(1, columnId);
+                stmt.setLong(2, tx.getNewSnapshotId());
+                stmt.setLong(3, tableId);
+                stmt.setLong(4, columnOrder);
+                stmt.setString(5, newName);
+                stmt.setString(6, columnType);
+                stmt.setBoolean(7, nullsAllowed);
+                stmt.executeUpdate();
+            }
+
+            tx.incrementSchemaVersion(tableId);
+            tx.addChange("altered_table:" + tableId);
+        });
+    }
+
+    @Override
     public void commitInsert(long tableId, String schemaName, String tableName, List<DucklakeWriteFragment> fragments)
     {
         if (fragments.isEmpty()) {

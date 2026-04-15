@@ -99,9 +99,12 @@ Still deferred for views:
 - [x] `UPDATE`: implement as delete+insert in one atomic snapshot commit via `commitMerge`.
 - [x] `MERGE`: compose insert/delete fragments in one atomic snapshot; supports WHEN MATCHED THEN UPDATE/DELETE and WHEN NOT MATCHED THEN INSERT.
 
-### M7: ALTER + Hardening
+### M7: ALTER + Hardening — ALTER TABLE Complete
 
-- [ ] `ALTER TABLE ADD/DROP/RENAME COLUMN` with snapshot-versioned `ducklake_column`.
+- [x] `ALTER TABLE ADD COLUMN` with snapshot-versioned `ducklake_column`, nested type support.
+- [x] `ALTER TABLE DROP COLUMN` with end-snapshot on column and children.
+- [x] `ALTER TABLE RENAME COLUMN` with column_id-preserving rename (new ducklake_column row, same column_id).
+- [x] Field_id-based column matching in page source for schema evolution (handles renames across data files).
 - [ ] Schema evolution metadata alignment (`ducklake_schema_versions`, stats resilience).
 - [ ] Concurrency/conflict handling (optimistic commit conflict detection using snapshot lineage and changes).
 - [ ] Performance pass (writer scaling, file size tuning, stats cost).
@@ -191,7 +194,7 @@ cd plugin/trino-ducklake && ../../mvnw -Dair.check.skip-all -Dtest=TestDucklakeW
 - [x] Calendar and epoch temporal partition encoding supported.
 - [x] 10 cross-engine compatibility tests green (Trino writes -> DuckDB reads).
 - [x] No regressions on existing read-path suites.
-- [x] 410 tests pass, 0 failures (including 25 row-level mutation tests).
+- [x] 418 tests pass, 0 failures (25 row-level mutation tests + 8 ALTER TABLE tests).
 
 ## Risk Register
 

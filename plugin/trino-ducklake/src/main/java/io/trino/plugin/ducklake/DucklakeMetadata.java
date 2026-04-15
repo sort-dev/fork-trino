@@ -37,6 +37,7 @@ import io.trino.spi.connector.ColumnMetadata;
 import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
@@ -827,6 +828,32 @@ public class DucklakeMetadata
     {
         DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
         catalog.dropTable(handle.schemaName(), handle.tableName());
+    }
+
+    // ==================== ALTER TABLE ====================
+
+    @Override
+    public void addColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column, ColumnPosition position)
+    {
+        DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
+        TableColumnSpec columnSpec = toColumnSpec(column.getName(), column.getType(), column.isNullable());
+        catalog.addColumn(handle.tableId(), handle.schemaName(), handle.tableName(), columnSpec);
+    }
+
+    @Override
+    public void dropColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle column)
+    {
+        DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
+        DucklakeColumnHandle ducklakeColumn = (DucklakeColumnHandle) column;
+        catalog.dropColumn(handle.tableId(), handle.schemaName(), handle.tableName(), ducklakeColumn.columnId());
+    }
+
+    @Override
+    public void renameColumn(ConnectorSession session, ConnectorTableHandle tableHandle, ColumnHandle source, String target)
+    {
+        DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
+        DucklakeColumnHandle ducklakeColumn = (DucklakeColumnHandle) source;
+        catalog.renameColumn(handle.tableId(), handle.schemaName(), handle.tableName(), ducklakeColumn.columnId(), target);
     }
 
     // ==================== INSERT ====================
