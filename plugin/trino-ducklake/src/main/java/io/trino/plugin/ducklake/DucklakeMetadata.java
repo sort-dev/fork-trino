@@ -35,6 +35,7 @@ import io.trino.plugin.ducklake.catalog.TableColumnSpec;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.spi.connector.ColumnNotFoundException;
 import io.trino.spi.connector.ColumnPosition;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMergeTableHandle;
@@ -87,6 +88,7 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
@@ -1253,6 +1255,87 @@ public class DucklakeMetadata
     }
 
     @Override
+    public void renameView(ConnectorSession session, SchemaTableName source, SchemaTableName target)
+    {
+        if (source.equals(target)) {
+            return;
+        }
+
+        long snapshotId = snapshotResolver.resolveSnapshotId(session);
+        Optional<DucklakeView> sourceView = catalog.getView(source.getSchemaName(), source.getTableName(), snapshotId);
+        if (sourceView.isEmpty() || !isViewAccessible(sourceView.get())) {
+            throw new ViewNotFoundException(source);
+        }
+
+        if (catalog.getTable(target, snapshotId).isPresent() || catalog.getView(target.getSchemaName(), target.getTableName(), snapshotId).isPresent()) {
+            throw new TrinoException(ALREADY_EXISTS, "Relation already exists: " + target);
+        }
+
+        catalog.renameView(source.getSchemaName(), source.getTableName(), target.getSchemaName(), target.getTableName());
+    }
+
+    @Override
+    public void setViewComment(ConnectorSession session, SchemaTableName viewName, Optional<String> comment)
+    {
+        ConnectorViewDefinition definition = getRequiredViewDefinition(session, viewName);
+        ConnectorViewDefinition updated = new ConnectorViewDefinition(
+                definition.getOriginalSql(),
+                definition.getCatalog(),
+                definition.getSchema(),
+                definition.getColumns(),
+                comment,
+                definition.getOwner(),
+                definition.isRunAsInvoker(),
+                definition.getPath());
+
+        catalog.replaceViewMetadata(
+                viewName.getSchemaName(),
+                viewName.getTableName(),
+                updated.getOriginalSql(),
+                TRINO_VIEW_DIALECT,
+                VIEW_CODEC.toJson(updated));
+    }
+
+    @Override
+    public void setViewColumnComment(ConnectorSession session, SchemaTableName viewName, String columnName, Optional<String> comment)
+    {
+        ConnectorViewDefinition definition = getRequiredViewDefinition(session, viewName);
+
+        boolean updated = false;
+        ImmutableList.Builder<ConnectorViewDefinition.ViewColumn> columnsBuilder = ImmutableList.builderWithExpectedSize(definition.getColumns().size());
+        for (ConnectorViewDefinition.ViewColumn column : definition.getColumns()) {
+            if (column.getName().equals(columnName)) {
+                columnsBuilder.add(new ConnectorViewDefinition.ViewColumn(column.getName(), column.getType(), comment));
+                updated = true;
+            }
+            else {
+                columnsBuilder.add(column);
+            }
+        }
+        if (!updated) {
+            throw new ColumnNotFoundException(viewName, columnName);
+        }
+        List<ConnectorViewDefinition.ViewColumn> columns = columnsBuilder.build();
+
+        ConnectorViewDefinition updatedDefinition = new ConnectorViewDefinition(
+                definition.getOriginalSql(),
+                definition.getCatalog(),
+                definition.getSchema(),
+                columns,
+                definition.getComment(),
+                definition.getOwner(),
+                definition.isRunAsInvoker(),
+                definition.getPath());
+
+        catalog.replaceViewMetadata(
+                viewName.getSchemaName(),
+                viewName.getTableName(),
+                updatedDefinition.getOriginalSql(),
+                TRINO_VIEW_DIALECT,
+                VIEW_CODEC.toJson(updatedDefinition));
+    }
+
+    @Override
     public void dropView(ConnectorSession session, SchemaTableName viewName)
     {
         long snapshotId = snapshotResolver.resolveSnapshotId(session);
@@ -1262,6 +1345,18 @@ public class DucklakeMetadata
         }
 
         catalog.dropView(viewName.getSchemaName(), viewName.getTableName());
+    }
+
+    private ConnectorViewDefinition getRequiredViewDefinition(ConnectorSession session, SchemaTableName viewName)
+    {
+        long snapshotId = snapshotResolver.resolveSnapshotId(session);
+        Optional<DucklakeView> view = catalog.getView(viewName.getSchemaName(), viewName.getTableName(), snapshotId);
+        if (view.isEmpty() || !isViewAccessible(view.get())) {
+            throw new ViewNotFoundException(viewName);
+        }
+
+        return decodeTrinoView(view.get(), viewName)
+                .orElseThrow(() -> new ViewNotFoundException(viewName, "View metadata is unavailable"));
     }
 
     /**

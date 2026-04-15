@@ -38,12 +38,7 @@ Views were the first write-side milestone and are now implemented:
 - Read side: `listViews`, `getView`, `isView`, `getViews` in `DucklakeMetadata`
 - Catalog model/API: `DucklakeView` + JDBC view queries
 - Dialect handling: expose Trino dialect views, skip non-Trino dialects with logging
-- Write side: `createView` and `dropView` commit snapshot-scoped catalog mutations
-
-Still deferred for views:
-
-- `renameView`
-- view comment operations
+- Write side: `createView`, `dropView`, `renameView`, `setViewComment`, and `setViewColumnComment` with snapshot-scoped catalog mutations
 
 ## Completed Milestones
 
@@ -110,7 +105,7 @@ Still deferred for views:
 - [x] Decision: keep strict stats invalidation (no `% changed > N` heuristic) as default for cross-engine safety.
 - [x] Schema evolution metadata alignment (`ducklake_schema_versions`): schema-changing operations append table-scoped rows; inlined schema resolution prefers table-scoped `begin_snapshot` with fallback.
 - [x] Concurrency/conflict handling: strict optimistic checks before snapshot commit, with `TRANSACTION_CONFLICT` on stale lineage and conflict diagnostics from `ducklake_snapshot_changes`.
-- [ ] Performance pass (writer scaling, file size tuning, stats cost).
+- [x] Performance pass: reduced stats/write overhead by batching metadata inserts and table-column-stats upserts in `JdbcDucklakeCatalog.applyInsertFragments()`.
 
 ### M8: Maintenance Operations (Post-v1)
 

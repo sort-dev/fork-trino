@@ -228,9 +228,6 @@ Implemented baseline:
 
 Still pending:
 
-- `renameView`
-- `setViewComment`
-- `setViewColumnComment`
 - optional cross-dialect transpilation (research item below)
 
 ### Future: Cross-Dialect View Transpilation (Research Item)
@@ -270,7 +267,7 @@ Iceberg connector implements all view methods by delegating to `catalog.listView
 - [x] Add DuckDB-created views to `DucklakeCatalogGenerator` (simple_view, aliased_view, duckdb_specific_view)
 - [x] Test `listViews` returns views from catalog
 - [x] Test `getView` returns `ConnectorViewDefinition` with correct SQL and columns
-- [ ] Test view snapshot scoping (view visible at snapshot N but not N-1)
+- [x] Test view snapshot scoping (view visible at snapshot N but not N-1)
 - [x] Test dialect filtering (DuckDB-dialect views handled gracefully)
 - [ ] Test views across all catalog backends (SQLite, PostgreSQL, DuckDB)
 

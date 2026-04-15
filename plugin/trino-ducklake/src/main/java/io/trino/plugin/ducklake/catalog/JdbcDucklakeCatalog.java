@@ -32,6 +32,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,6 +40,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -1283,19 +1285,7 @@ public class JdbcDucklakeCatalog
             long viewId = tx.allocateCatalogId();
             tx.addChange("created_view:" + viewName);
 
-            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                    "INSERT INTO ducklake_view (view_id, view_uuid, begin_snapshot, end_snapshot, schema_id, view_name, dialect, sql, column_aliases) " +
-                            "VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)")) {
-                stmt.setLong(1, viewId);
-                setUuid(stmt, 2, UUID.randomUUID().toString());
-                stmt.setLong(3, tx.getNewSnapshotId());
-                stmt.setLong(4, schemaId);
-                stmt.setString(5, viewName);
-                stmt.setString(6, dialect);
-                stmt.setString(7, viewSql);
-                stmt.setString(8, columnAliases);
-                stmt.executeUpdate();
-            }
+            insertViewRow(tx, viewId, UUID.randomUUID().toString(), schemaId, viewName, dialect, viewSql, columnAliases);
         });
     }
 
@@ -1304,34 +1294,165 @@ public class JdbcDucklakeCatalog
     {
         executeWriteTransaction("drop view " + schemaName + "." + viewName, tx -> {
             long schemaId = tx.resolveSchemaId(schemaName);
-
-            // Resolve view_id for the change string (spec requires ID, not name)
-            long viewId;
-            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                    "SELECT view_id FROM ducklake_view " +
-                            "WHERE schema_id = ? AND view_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
-                stmt.setLong(1, schemaId);
-                stmt.setString(2, viewName);
-                stmt.setLong(3, tx.getCurrentSnapshotId());
-                stmt.setLong(4, tx.getCurrentSnapshotId());
-                try (ResultSet rs = stmt.executeQuery()) {
-                    if (!rs.next()) {
-                        throw new RuntimeException("View not found: " + schemaName + "." + viewName);
-                    }
-                    viewId = rs.getLong("view_id");
-                }
-            }
-
-            tx.addChange("dropped_view:" + viewId);
-
-            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                    "UPDATE ducklake_view SET end_snapshot = ? WHERE view_id = ? AND end_snapshot IS NULL")) {
-                stmt.setLong(1, tx.getNewSnapshotId());
-                stmt.setLong(2, viewId);
-                stmt.executeUpdate();
-            }
+            ActiveViewRow view = resolveActiveViewRow(tx, schemaId, viewName);
+            endSnapshotActiveView(tx, view.viewId());
+            tx.addChange("dropped_view:" + view.viewId());
         });
     }
+
+    @Override
+    public void renameView(
+            String sourceSchemaName,
+            String sourceViewName,
+            String targetSchemaName,
+            String targetViewName)
+    {
+        executeWriteTransaction(
+                "rename view " + sourceSchemaName + "." + sourceViewName + " to " + targetSchemaName + "." + targetViewName,
+                tx -> {
+                    long sourceSchemaId = tx.resolveSchemaId(sourceSchemaName);
+                    ActiveViewRow sourceView = resolveActiveViewRow(tx, sourceSchemaId, sourceViewName);
+                    long targetSchemaId = tx.resolveSchemaId(targetSchemaName);
+
+                    if (hasActiveTable(tx, targetSchemaId, targetViewName) || hasActiveView(tx, targetSchemaId, targetViewName)) {
+                        throw new RuntimeException("Relation already exists: " + targetSchemaName + "." + targetViewName);
+                    }
+
+                    endSnapshotActiveView(tx, sourceView.viewId());
+                    insertViewRow(
+                            tx,
+                            sourceView.viewId(),
+                            sourceView.viewUuid(),
+                            targetSchemaId,
+                            targetViewName,
+                            sourceView.dialect(),
+                            sourceView.sql(),
+                            sourceView.columnAliases().orElse(null));
+                    tx.addChange("renamed_view:" + sourceView.viewId());
+                });
+    }
+
+    @Override
+    public void replaceViewMetadata(String schemaName, String viewName, String viewSql, String dialect, String columnAliases)
+    {
+        executeWriteTransaction("alter view " + schemaName + "." + viewName, tx -> {
+            long schemaId = tx.resolveSchemaId(schemaName);
+            ActiveViewRow view = resolveActiveViewRow(tx, schemaId, viewName);
+
+            endSnapshotActiveView(tx, view.viewId());
+            insertViewRow(tx, view.viewId(), view.viewUuid(), schemaId, viewName, dialect, viewSql, columnAliases);
+            tx.addChange("altered_view:" + view.viewId());
+        });
+    }
+
+    private ActiveViewRow resolveActiveViewRow(DucklakeWriteTransaction tx, long schemaId, String viewName)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                "SELECT view_id, view_uuid, schema_id, view_name, dialect, sql, column_aliases " +
+                        "FROM ducklake_view " +
+                        "WHERE schema_id = ? AND view_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL)")) {
+            stmt.setLong(1, schemaId);
+            stmt.setString(2, viewName);
+            stmt.setLong(3, tx.getCurrentSnapshotId());
+            stmt.setLong(4, tx.getCurrentSnapshotId());
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    throw new RuntimeException("View not found: schema_id=" + schemaId + ", view_name=" + viewName);
+                }
+
+                return new ActiveViewRow(
+                        rs.getLong("view_id"),
+                        rs.getString("view_uuid"),
+                        rs.getLong("schema_id"),
+                        rs.getString("view_name"),
+                        rs.getString("dialect"),
+                        rs.getString("sql"),
+                        getStringOptional(rs, "column_aliases"));
+            }
+        }
+    }
+
+    private void insertViewRow(
+            DucklakeWriteTransaction tx,
+            long viewId,
+            String viewUuid,
+            long schemaId,
+            String viewName,
+            String dialect,
+            String viewSql,
+            String columnAliases)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                "INSERT INTO ducklake_view (view_id, view_uuid, begin_snapshot, end_snapshot, schema_id, view_name, dialect, sql, column_aliases) " +
+                        "VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)")) {
+            stmt.setLong(1, viewId);
+            setUuid(stmt, 2, viewUuid);
+            stmt.setLong(3, tx.getNewSnapshotId());
+            stmt.setLong(4, schemaId);
+            stmt.setString(5, viewName);
+            stmt.setString(6, dialect);
+            stmt.setString(7, viewSql);
+            setNullableString(stmt, 8, columnAliases);
+            stmt.executeUpdate();
+        }
+    }
+
+    private void endSnapshotActiveView(DucklakeWriteTransaction tx, long viewId)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                "UPDATE ducklake_view SET end_snapshot = ? WHERE view_id = ? AND end_snapshot IS NULL")) {
+            stmt.setLong(1, tx.getNewSnapshotId());
+            stmt.setLong(2, viewId);
+            int updatedRows = stmt.executeUpdate();
+            if (updatedRows == 0) {
+                throw new RuntimeException("View not found: " + viewId);
+            }
+        }
+    }
+
+    private static boolean hasActiveView(DucklakeWriteTransaction tx, long schemaId, String viewName)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                "SELECT 1 FROM ducklake_view " +
+                        "WHERE schema_id = ? AND view_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL) LIMIT 1")) {
+            stmt.setLong(1, schemaId);
+            stmt.setString(2, viewName);
+            stmt.setLong(3, tx.getCurrentSnapshotId());
+            stmt.setLong(4, tx.getCurrentSnapshotId());
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private static boolean hasActiveTable(DucklakeWriteTransaction tx, long schemaId, String tableName)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                "SELECT 1 FROM ducklake_table " +
+                        "WHERE schema_id = ? AND table_name = ? AND ? >= begin_snapshot AND (? < end_snapshot OR end_snapshot IS NULL) LIMIT 1")) {
+            stmt.setLong(1, schemaId);
+            stmt.setString(2, tableName);
+            stmt.setLong(3, tx.getCurrentSnapshotId());
+            stmt.setLong(4, tx.getCurrentSnapshotId());
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private record ActiveViewRow(
+            long viewId,
+            String viewUuid,
+            long schemaId,
+            String viewName,
+            String dialect,
+            String sql,
+            Optional<String> columnAliases) {}
 
     // ==================== Schema DDL ====================
 
@@ -1684,92 +1805,79 @@ public class JdbcDucklakeCatalog
         long runningRowId = currentNextRowId;
         long totalRecords = 0;
         long totalFileSize = 0;
-
-        for (DucklakeWriteFragment fragment : fragments) {
-            long dataFileId = tx.allocateFileId();
-
-            // Insert ducklake_data_file
-            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                    "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, " +
-                            "file_order, path, path_is_relative, file_format, record_count, file_size_bytes, " +
-                            "footer_size, row_id_start, partition_id) " +
-                            "VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, ?, ?, ?)")) {
-                stmt.setLong(1, dataFileId);
-                stmt.setLong(2, tableId);
-                stmt.setLong(3, tx.getNewSnapshotId());
-                stmt.setNull(4, java.sql.Types.BIGINT); // file_order: NULL matches DuckDB convention
-                stmt.setString(5, fragment.path());
-                stmt.setLong(6, fragment.recordCount());
-                stmt.setLong(7, fragment.fileSizeBytes());
-                stmt.setLong(8, fragment.footerSize());
-                stmt.setLong(9, runningRowId);
-                if (fragment.partitionId().isPresent()) {
-                    stmt.setLong(10, fragment.partitionId().getAsLong());
-                }
-                else {
-                    stmt.setNull(10, java.sql.Types.BIGINT);
-                }
-                stmt.executeUpdate();
-            }
-
-            // Insert ducklake_file_partition_value rows for partitioned files
-            if (!fragment.partitionValues().isEmpty()) {
-                try (PreparedStatement pvStmt = tx.getConnection().prepareStatement(
+        int partitionValueBatchRows = 0;
+        int fileColumnStatsBatchRows = 0;
+        try (PreparedStatement dataFileStmt = tx.getConnection().prepareStatement(
+                "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, " +
+                        "file_order, path, path_is_relative, file_format, record_count, file_size_bytes, " +
+                        "footer_size, row_id_start, partition_id) " +
+                        "VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, ?, ?, ?)");
+                PreparedStatement partitionValueStmt = tx.getConnection().prepareStatement(
                         "INSERT INTO ducklake_file_partition_value (table_id, data_file_id, partition_key_index, partition_value) " +
-                                "VALUES (?, ?, ?, ?)")) {
-                    for (Map.Entry<Integer, String> pv : fragment.partitionValues().entrySet()) {
-                        pvStmt.setLong(1, tableId);
-                        pvStmt.setLong(2, dataFileId);
-                        pvStmt.setInt(3, pv.getKey());
-                        if (pv.getValue() != null) {
-                            pvStmt.setString(4, pv.getValue());
-                        }
-                        else {
-                            pvStmt.setNull(4, java.sql.Types.VARCHAR);
-                        }
-                        pvStmt.addBatch();
-                    }
-                    pvStmt.executeBatch();
-                }
-            }
-
-            // Insert ducklake_file_column_stats per column
-            for (DucklakeFileColumnStats colStats : fragment.columnStats()) {
-                try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                                "VALUES (?, ?, ?, ?)");
+                PreparedStatement fileColumnStatsStmt = tx.getConnection().prepareStatement(
                         "INSERT INTO ducklake_file_column_stats (data_file_id, table_id, column_id, " +
                                 "column_size_bytes, value_count, null_count, min_value, max_value, contains_nan) " +
                                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
-                    stmt.setLong(1, dataFileId);
-                    stmt.setLong(2, tableId);
-                    stmt.setLong(3, colStats.columnId());
-                    stmt.setLong(4, colStats.columnSizeBytes());
-                    stmt.setLong(5, colStats.valueCount());
-                    stmt.setLong(6, colStats.nullCount());
-                    if (colStats.minValue().isPresent()) {
-                        stmt.setString(7, colStats.minValue().get());
-                    }
-                    else {
-                        stmt.setNull(7, java.sql.Types.VARCHAR);
-                    }
-                    if (colStats.maxValue().isPresent()) {
-                        stmt.setString(8, colStats.maxValue().get());
-                    }
-                    else {
-                        stmt.setNull(8, java.sql.Types.VARCHAR);
-                    }
-                    if (colStats.containsNan()) {
-                        stmt.setBoolean(9, true);
-                    }
-                    else {
-                        stmt.setNull(9, java.sql.Types.BOOLEAN);
-                    }
-                    stmt.executeUpdate();
+            for (DucklakeWriteFragment fragment : fragments) {
+                long dataFileId = tx.allocateFileId();
+
+                dataFileStmt.setLong(1, dataFileId);
+                dataFileStmt.setLong(2, tableId);
+                dataFileStmt.setLong(3, tx.getNewSnapshotId());
+                dataFileStmt.setNull(4, java.sql.Types.BIGINT); // file_order: NULL matches DuckDB convention
+                dataFileStmt.setString(5, fragment.path());
+                dataFileStmt.setLong(6, fragment.recordCount());
+                dataFileStmt.setLong(7, fragment.fileSizeBytes());
+                dataFileStmt.setLong(8, fragment.footerSize());
+                dataFileStmt.setLong(9, runningRowId);
+                if (fragment.partitionId().isPresent()) {
+                    dataFileStmt.setLong(10, fragment.partitionId().getAsLong());
                 }
+                else {
+                    dataFileStmt.setNull(10, java.sql.Types.BIGINT);
+                }
+                dataFileStmt.executeUpdate();
+
+                for (Map.Entry<Integer, String> partitionValue : fragment.partitionValues().entrySet()) {
+                    partitionValueStmt.setLong(1, tableId);
+                    partitionValueStmt.setLong(2, dataFileId);
+                    partitionValueStmt.setInt(3, partitionValue.getKey());
+                    setNullableString(partitionValueStmt, 4, partitionValue.getValue());
+                    partitionValueStmt.addBatch();
+                    partitionValueBatchRows++;
+                }
+
+                for (DucklakeFileColumnStats columnStats : fragment.columnStats()) {
+                    fileColumnStatsStmt.setLong(1, dataFileId);
+                    fileColumnStatsStmt.setLong(2, tableId);
+                    fileColumnStatsStmt.setLong(3, columnStats.columnId());
+                    fileColumnStatsStmt.setLong(4, columnStats.columnSizeBytes());
+                    fileColumnStatsStmt.setLong(5, columnStats.valueCount());
+                    fileColumnStatsStmt.setLong(6, columnStats.nullCount());
+                    setNullableString(fileColumnStatsStmt, 7, columnStats.minValue().orElse(null));
+                    setNullableString(fileColumnStatsStmt, 8, columnStats.maxValue().orElse(null));
+                    if (columnStats.containsNan()) {
+                        fileColumnStatsStmt.setBoolean(9, true);
+                    }
+                    else {
+                        fileColumnStatsStmt.setNull(9, java.sql.Types.BOOLEAN);
+                    }
+                    fileColumnStatsStmt.addBatch();
+                    fileColumnStatsBatchRows++;
+                }
+
+                runningRowId += fragment.recordCount();
+                totalRecords += fragment.recordCount();
+                totalFileSize += fragment.fileSizeBytes();
             }
 
-            runningRowId += fragment.recordCount();
-            totalRecords += fragment.recordCount();
-            totalFileSize += fragment.fileSizeBytes();
+            if (partitionValueBatchRows > 0) {
+                partitionValueStmt.executeBatch();
+            }
+            if (fileColumnStatsBatchRows > 0) {
+                fileColumnStatsStmt.executeBatch();
+            }
         }
 
         // Insert or update ducklake_table_stats
@@ -1803,64 +1911,93 @@ public class JdbcDucklakeCatalog
             }
         }
 
-        for (Map.Entry<Long, AggregatedColumnStats> entry : columnAggregates.entrySet()) {
-            long columnId = entry.getKey();
-            AggregatedColumnStats agg = entry.getValue();
-
-            // Check if row exists already (from prior insert)
-            boolean exists;
-            try (PreparedStatement check = tx.getConnection().prepareStatement(
-                    "SELECT 1 FROM ducklake_table_column_stats WHERE table_id = ? AND column_id = ?")) {
-                check.setLong(1, tableId);
-                check.setLong(2, columnId);
-                try (ResultSet rs = check.executeQuery()) {
-                    exists = rs.next();
-                }
-            }
-
-            if (exists) {
-                // Merge with existing: widen min/max, OR contains_null/contains_nan
-                try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                        "UPDATE ducklake_table_column_stats SET " +
-                                "contains_null = (contains_null OR ?), " +
-                                "contains_nan = (contains_nan OR ?), " +
-                                "min_value = CASE WHEN min_value IS NULL THEN ? WHEN ? IS NULL THEN min_value WHEN ? < min_value THEN ? ELSE min_value END, " +
-                                "max_value = CASE WHEN max_value IS NULL THEN ? WHEN ? IS NULL THEN max_value WHEN ? > max_value THEN ? ELSE max_value END " +
-                                "WHERE table_id = ? AND column_id = ?")) {
-                    stmt.setBoolean(1, agg.containsNull);
-                    stmt.setBoolean(2, agg.containsNan);
-                    setNullableString(stmt, 3, agg.minValue);
-                    setNullableString(stmt, 4, agg.minValue);
-                    setNullableString(stmt, 5, agg.minValue);
-                    setNullableString(stmt, 6, agg.minValue);
-                    setNullableString(stmt, 7, agg.maxValue);
-                    setNullableString(stmt, 8, agg.maxValue);
-                    setNullableString(stmt, 9, agg.maxValue);
-                    setNullableString(stmt, 10, agg.maxValue);
-                    stmt.setLong(11, tableId);
-                    stmt.setLong(12, columnId);
-                    stmt.executeUpdate();
-                }
-            }
-            else {
-                try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+        Set<Long> existingColumnStats = loadExistingColumnStatsColumnIds(tx, tableId, columnAggregates.keySet());
+        try (PreparedStatement updateTableColumnStatsStmt = tx.getConnection().prepareStatement(
+                "UPDATE ducklake_table_column_stats SET " +
+                        "contains_null = (contains_null OR ?), " +
+                        "contains_nan = (contains_nan OR ?), " +
+                        "min_value = CASE WHEN min_value IS NULL THEN ? WHEN ? IS NULL THEN min_value WHEN ? < min_value THEN ? ELSE min_value END, " +
+                        "max_value = CASE WHEN max_value IS NULL THEN ? WHEN ? IS NULL THEN max_value WHEN ? > max_value THEN ? ELSE max_value END " +
+                        "WHERE table_id = ? AND column_id = ?");
+                PreparedStatement insertTableColumnStatsStmt = tx.getConnection().prepareStatement(
                         "INSERT INTO ducklake_table_column_stats (table_id, column_id, contains_null, contains_nan, min_value, max_value) " +
                                 "VALUES (?, ?, ?, ?, ?, ?)")) {
-                    stmt.setLong(1, tableId);
-                    stmt.setLong(2, columnId);
-                    stmt.setBoolean(3, agg.containsNull);
+            int updateBatchRows = 0;
+            int insertBatchRows = 0;
+            for (Map.Entry<Long, AggregatedColumnStats> entry : columnAggregates.entrySet()) {
+                long columnId = entry.getKey();
+                AggregatedColumnStats agg = entry.getValue();
+
+                if (existingColumnStats.contains(columnId)) {
+                    updateTableColumnStatsStmt.setBoolean(1, agg.containsNull);
+                    updateTableColumnStatsStmt.setBoolean(2, agg.containsNan);
+                    setNullableString(updateTableColumnStatsStmt, 3, agg.minValue);
+                    setNullableString(updateTableColumnStatsStmt, 4, agg.minValue);
+                    setNullableString(updateTableColumnStatsStmt, 5, agg.minValue);
+                    setNullableString(updateTableColumnStatsStmt, 6, agg.minValue);
+                    setNullableString(updateTableColumnStatsStmt, 7, agg.maxValue);
+                    setNullableString(updateTableColumnStatsStmt, 8, agg.maxValue);
+                    setNullableString(updateTableColumnStatsStmt, 9, agg.maxValue);
+                    setNullableString(updateTableColumnStatsStmt, 10, agg.maxValue);
+                    updateTableColumnStatsStmt.setLong(11, tableId);
+                    updateTableColumnStatsStmt.setLong(12, columnId);
+                    updateTableColumnStatsStmt.addBatch();
+                    updateBatchRows++;
+                }
+                else {
+                    insertTableColumnStatsStmt.setLong(1, tableId);
+                    insertTableColumnStatsStmt.setLong(2, columnId);
+                    insertTableColumnStatsStmt.setBoolean(3, agg.containsNull);
                     if (agg.containsNan) {
-                        stmt.setBoolean(4, true);
+                        insertTableColumnStatsStmt.setBoolean(4, true);
                     }
                     else {
-                        stmt.setNull(4, java.sql.Types.BOOLEAN);
+                        insertTableColumnStatsStmt.setNull(4, java.sql.Types.BOOLEAN);
                     }
-                    setNullableString(stmt, 5, agg.minValue);
-                    setNullableString(stmt, 6, agg.maxValue);
-                    stmt.executeUpdate();
+                    setNullableString(insertTableColumnStatsStmt, 5, agg.minValue);
+                    setNullableString(insertTableColumnStatsStmt, 6, agg.maxValue);
+                    insertTableColumnStatsStmt.addBatch();
+                    insertBatchRows++;
+                }
+            }
+
+            if (updateBatchRows > 0) {
+                updateTableColumnStatsStmt.executeBatch();
+            }
+            if (insertBatchRows > 0) {
+                insertTableColumnStatsStmt.executeBatch();
+            }
+        }
+    }
+
+    private static Set<Long> loadExistingColumnStatsColumnIds(DucklakeWriteTransaction tx, long tableId, Set<Long> candidateColumnIds)
+            throws SQLException
+    {
+        if (candidateColumnIds.isEmpty()) {
+            return Set.of();
+        }
+
+        List<Long> orderedColumnIds = new ArrayList<>(candidateColumnIds);
+        String placeholders = orderedColumnIds.stream()
+                .map(ignored -> "?")
+                .collect(Collectors.joining(", "));
+        String sql = "SELECT column_id FROM ducklake_table_column_stats WHERE table_id = ? AND column_id IN (" + placeholders + ")";
+
+        Set<Long> existingColumnIds = new HashSet<>();
+        try (PreparedStatement stmt = tx.getConnection().prepareStatement(sql)) {
+            int parameterIndex = 1;
+            stmt.setLong(parameterIndex++, tableId);
+            for (long columnId : orderedColumnIds) {
+                stmt.setLong(parameterIndex++, columnId);
+            }
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    existingColumnIds.add(rs.getLong("column_id"));
                 }
             }
         }
+        return existingColumnIds;
     }
 
     @Override

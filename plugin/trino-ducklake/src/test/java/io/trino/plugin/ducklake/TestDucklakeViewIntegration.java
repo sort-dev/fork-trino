@@ -110,6 +110,79 @@ public class TestDucklakeViewIntegration
     }
 
     @Test
+    public void testRenameView()
+    {
+        try {
+            computeActual("CREATE VIEW test_schema.rename_src_view AS SELECT id, name FROM simple_table WHERE id <= 2");
+
+            computeActual("ALTER VIEW test_schema.rename_src_view RENAME TO rename_dst_view");
+
+            MaterializedResult source = computeActual(
+                    "SELECT table_name FROM information_schema.views WHERE table_schema = 'test_schema' AND table_name = 'rename_src_view'");
+            assertThat(source.getRowCount()).isEqualTo(0);
+
+            MaterializedResult target = computeActual(
+                    "SELECT table_name FROM information_schema.views WHERE table_schema = 'test_schema' AND table_name = 'rename_dst_view'");
+            assertThat(target.getRowCount()).isEqualTo(1);
+
+            MaterializedResult data = computeActual("SELECT id, name FROM test_schema.rename_dst_view ORDER BY id");
+            assertThat(data.getRowCount()).isEqualTo(2);
+            assertThat(data.getMaterializedRows().get(0).getField(1)).isEqualTo("Product A");
+            assertThat(data.getMaterializedRows().get(1).getField(1)).isEqualTo("Product B");
+        }
+        finally {
+            tryDropView("test_schema.rename_src_view");
+            tryDropView("test_schema.rename_dst_view");
+        }
+    }
+
+    @Test
+    public void testViewComment()
+    {
+        try {
+            computeActual("CREATE VIEW test_schema.view_comment_test AS SELECT id, name FROM simple_table");
+
+            computeActual("COMMENT ON VIEW test_schema.view_comment_test IS 'view-level comment'");
+            String showCreateWithComment = (String) computeActual("SHOW CREATE VIEW test_schema.view_comment_test").getOnlyValue();
+            assertThat(showCreateWithComment).contains("COMMENT 'view-level comment'");
+
+            computeActual("COMMENT ON VIEW test_schema.view_comment_test IS NULL");
+            String showCreateWithoutComment = (String) computeActual("SHOW CREATE VIEW test_schema.view_comment_test").getOnlyValue();
+            assertThat(showCreateWithoutComment).doesNotContain("COMMENT 'view-level comment'");
+        }
+        finally {
+            tryDropView("test_schema.view_comment_test");
+        }
+    }
+
+    @Test
+    public void testViewColumnComment()
+    {
+        try {
+            computeActual("CREATE VIEW test_schema.view_column_comment_test AS SELECT id, name FROM simple_table");
+
+            computeActual("COMMENT ON COLUMN test_schema.view_column_comment_test.name IS 'name comment'");
+            MaterializedResult describedWithComment = computeActual("DESCRIBE test_schema.view_column_comment_test");
+            assertThat(describedWithComment.getMaterializedRows().stream()
+                    .filter(row -> row.getField(0).equals("name"))
+                    .findFirst()
+                    .orElseThrow()
+                    .getField(3)).isEqualTo("name comment");
+
+            computeActual("COMMENT ON COLUMN test_schema.view_column_comment_test.name IS NULL");
+            MaterializedResult describedWithoutComment = computeActual("DESCRIBE test_schema.view_column_comment_test");
+            assertThat(describedWithoutComment.getMaterializedRows().stream()
+                    .filter(row -> row.getField(0).equals("name"))
+                    .findFirst()
+                    .orElseThrow()
+                    .getField(3)).isIn((Object) null, "");
+        }
+        finally {
+            tryDropView("test_schema.view_column_comment_test");
+        }
+    }
+
+    @Test
     public void testCreateOrReplaceView()
     {
         try {

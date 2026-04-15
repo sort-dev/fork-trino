@@ -231,6 +231,18 @@ public interface DucklakeCatalog
     void createView(String schemaName, String viewName, String sql, String dialect, String columnAliases);
 
     /**
+     * Rename an existing view, optionally moving it across schemas.
+     * Preserves view identity (view_id/view_uuid) and creates a new snapshot atomically.
+     */
+    void renameView(String sourceSchemaName, String sourceViewName, String targetSchemaName, String targetViewName);
+
+    /**
+     * Replace active view metadata while preserving view identity.
+     * Used for view comment and column-comment updates.
+     */
+    void replaceViewMetadata(String schemaName, String viewName, String sql, String dialect, String columnAliases);
+
+    /**
      * Drop an existing view from the catalog.
      * Creates a new snapshot and sets end_snapshot on the view row atomically.
      */

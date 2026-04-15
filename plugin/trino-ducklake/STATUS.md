@@ -92,7 +92,7 @@ PostgreSQL is the only supported catalog backend. The connector uses `JdbcDuckla
 
 Implemented through snapshot-scoped catalog commits:
 
-- Views: `CREATE VIEW`, `DROP VIEW`
+- Views: `CREATE VIEW`, `DROP VIEW`, `ALTER VIEW ... RENAME TO`, `COMMENT ON VIEW`, `COMMENT ON COLUMN <view>.<column>`
 - Schemas: `CREATE SCHEMA`, `DROP SCHEMA` (non-empty schema drop rejected)
 - Tables: `CREATE TABLE`, `DROP TABLE`
   - supports nested type metadata mapping (`ARRAY`, `ROW`, `MAP`)
@@ -108,7 +108,7 @@ Implemented through snapshot-scoped catalog commits:
 - `DucklakeStatsExtractor` extracts per-column statistics from Parquet footer metadata.
 - `DucklakePathResolver` resolves table data paths from catalog/schema/table hierarchy.
 - `DucklakeMetadata` implements `beginInsert`/`finishInsert` and `beginCreateTable`/`finishCreateTable`.
-- `JdbcDucklakeCatalog.commitInsert()` atomically commits data file rows, file column stats, partition values, and table stats updates in a single write transaction.
+- `JdbcDucklakeCatalog.commitInsert()` atomically commits data file rows, file column stats, partition values, and table stats updates in a single write transaction, with batched metadata writes to reduce per-file/per-column statement overhead.
 - Abort path deletes written files on failure.
 - File rotation by target file size (configurable via `ParquetWriterConfig`).
 
