@@ -15,10 +15,13 @@ package io.trino.plugin.ducklake;
 
 import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
+import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeTableHandle;
+import io.trino.spi.connector.ConnectorMergeSink;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPageSink;
 import io.trino.spi.connector.ConnectorPageSinkId;
@@ -33,6 +36,7 @@ public class DucklakePageSinkProvider
 {
     private final DucklakeFileSystemFactory fileSystemFactory;
     private final JsonCodec<DucklakeWriteFragment> fragmentCodec;
+    private final JsonCodec<DucklakeDeleteFragment> deleteFragmentCodec;
     private final ParquetWriterConfig parquetWriterConfig;
     private final String trinoVersion;
     private final PageIndexerFactory pageIndexerFactory;
@@ -41,12 +45,14 @@ public class DucklakePageSinkProvider
     public DucklakePageSinkProvider(
             DucklakeFileSystemFactory fileSystemFactory,
             JsonCodec<DucklakeWriteFragment> fragmentCodec,
+            JsonCodec<DucklakeDeleteFragment> deleteFragmentCodec,
             ParquetWriterConfig parquetWriterConfig,
             NodeVersion nodeVersion,
             PageIndexerFactory pageIndexerFactory)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.fragmentCodec = requireNonNull(fragmentCodec, "fragmentCodec is null");
+        this.deleteFragmentCodec = requireNonNull(deleteFragmentCodec, "deleteFragmentCodec is null");
         this.parquetWriterConfig = requireNonNull(parquetWriterConfig, "parquetWriterConfig is null");
         this.trinoVersion = requireNonNull(nodeVersion, "nodeVersion is null").toString();
         this.pageIndexerFactory = requireNonNull(pageIndexerFactory, "pageIndexerFactory is null");
@@ -70,6 +76,34 @@ public class DucklakePageSinkProvider
             ConnectorPageSinkId pageSinkId)
     {
         return createPageSink((DucklakeWritableTableHandle) insertTableHandle, session);
+    }
+
+    @Override
+    public ConnectorMergeSink createMergeSink(
+            ConnectorTransactionHandle transactionHandle,
+            ConnectorSession session,
+            ConnectorMergeTableHandle mergeHandle,
+            ConnectorPageSinkId pageSinkId)
+    {
+        DucklakeMergeTableHandle ducklakeMergeHandle = (DucklakeMergeTableHandle) mergeHandle;
+
+        ParquetWriterOptions writerOptions = ParquetWriterOptions.builder()
+                .setMaxBlockSize(parquetWriterConfig.getBlockSize())
+                .setMaxPageSize(parquetWriterConfig.getPageSize())
+                .setMaxPageValueCount(parquetWriterConfig.getPageValueCount())
+                .setBatchSize(parquetWriterConfig.getBatchSize())
+                .build();
+
+        ConnectorPageSink insertSink = createPageSink(ducklakeMergeHandle.insertHandle(), session);
+
+        return new DucklakeMergeSink(
+                ducklakeMergeHandle,
+                fileSystemFactory.create(session),
+                deleteFragmentCodec,
+                fragmentCodec,
+                writerOptions,
+                trinoVersion,
+                insertSink);
     }
 
     private DucklakePageSink createPageSink(DucklakeWritableTableHandle handle, ConnectorSession session)

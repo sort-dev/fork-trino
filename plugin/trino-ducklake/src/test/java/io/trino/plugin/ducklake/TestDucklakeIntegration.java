@@ -1404,11 +1404,13 @@ public class TestDucklakeIntegration
     // ==================== Write operations (not yet supported) ====================
 
     @Test
-    public void testDeleteNotSupported()
+    public void testDeleteSupported()
     {
-        assertQueryFails(
-                "DELETE FROM simple_table WHERE id = 1",
-                ".*not supported.*|.*This connector does not support.*");
+        // DELETE is now supported — verify it doesn't throw "not supported"
+        // Uses a WHERE clause that matches no rows to avoid mutating shared test data
+        computeActual("DELETE FROM simple_table WHERE id = -999");
+        long count = (Long) computeScalar("SELECT count(*) FROM simple_table");
+        assertThat(count).isGreaterThan(0);
     }
 
     // ==================== Inlined Data Tests ====================

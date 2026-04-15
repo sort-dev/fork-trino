@@ -34,7 +34,11 @@ import io.trino.plugin.ducklake.catalog.TableColumnSpec;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
+import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
+import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
+import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
@@ -47,6 +51,7 @@ import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.RetryMode;
+import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
@@ -72,6 +77,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -116,17 +122,18 @@ public class DucklakeMetadata
     private final DucklakeTypeConverter typeConverter;
     private final DucklakeSnapshotResolver snapshotResolver;
     private final JsonCodec<DucklakeWriteFragment> fragmentCodec;
+    private final JsonCodec<DucklakeDeleteFragment> deleteFragmentCodec;
     private final DucklakePathResolver pathResolver;
     private final DucklakeTemporalPartitionEncoding temporalPartitionEncoding;
 
     public DucklakeMetadata(DucklakeCatalog catalog, DucklakeTypeConverter typeConverter)
     {
-        this(catalog, typeConverter, new DucklakeSnapshotResolver(catalog, OptionalLong.empty(), Optional.empty()), null, null, DucklakeTemporalPartitionEncoding.CALENDAR);
+        this(catalog, typeConverter, new DucklakeSnapshotResolver(catalog, OptionalLong.empty(), Optional.empty()), null, null, null, DucklakeTemporalPartitionEncoding.CALENDAR);
     }
 
     public DucklakeMetadata(DucklakeCatalog catalog, DucklakeTypeConverter typeConverter, DucklakeSnapshotResolver snapshotResolver)
     {
-        this(catalog, typeConverter, snapshotResolver, null, null, DucklakeTemporalPartitionEncoding.CALENDAR);
+        this(catalog, typeConverter, snapshotResolver, null, null, null, DucklakeTemporalPartitionEncoding.CALENDAR);
     }
 
     public DucklakeMetadata(
@@ -134,6 +141,7 @@ public class DucklakeMetadata
             DucklakeTypeConverter typeConverter,
             DucklakeSnapshotResolver snapshotResolver,
             JsonCodec<DucklakeWriteFragment> fragmentCodec,
+            JsonCodec<DucklakeDeleteFragment> deleteFragmentCodec,
             DucklakePathResolver pathResolver,
             DucklakeTemporalPartitionEncoding temporalPartitionEncoding)
     {
@@ -141,6 +149,7 @@ public class DucklakeMetadata
         this.typeConverter = requireNonNull(typeConverter, "typeConverter is null");
         this.snapshotResolver = requireNonNull(snapshotResolver, "snapshotResolver is null");
         this.fragmentCodec = fragmentCodec;
+        this.deleteFragmentCodec = deleteFragmentCodec;
         this.pathResolver = pathResolver;
         this.temporalPartitionEncoding = requireNonNull(temporalPartitionEncoding, "temporalPartitionEncoding is null");
     }
@@ -972,6 +981,115 @@ public class DucklakeMetadata
         }
 
         return pathResolver.resolveTableDataPath(schema.get(), table.get());
+    }
+
+    // ==================== DELETE / MERGE ====================
+
+    @Override
+    public RowChangeParadigm getRowChangeParadigm(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        return RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
+    }
+
+    @Override
+    public ColumnHandle getMergeRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        return DucklakeColumnHandle.rowIdColumnHandle();
+    }
+
+    @Override
+    public ConnectorMergeTableHandle beginMerge(
+            ConnectorSession session,
+            ConnectorTableHandle tableHandle,
+            Map<Integer, Collection<ColumnHandle>> updateCaseColumns,
+            RetryMode retryMode)
+    {
+        DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
+
+        // Build insert handle for UPDATE support (delete+insert pattern)
+        List<DucklakeColumnHandle> ducklakeColumns = catalog.getTableColumns(handle.tableId(), handle.snapshotId()).stream()
+                .filter(col -> col.parentColumn().isEmpty())
+                .map(col -> new DucklakeColumnHandle(
+                        col.columnId(),
+                        col.columnName(),
+                        typeConverter.toTrinoType(col.columnType()),
+                        col.nullsAllowed()))
+                .collect(toImmutableList());
+
+        List<DucklakeColumn> allCatalogColumns = catalog.getAllColumnsFlat(handle.tableId(), handle.snapshotId());
+
+        List<DucklakePartitionSpec> partitionSpecs = catalog.getPartitionSpecs(handle.tableId(), handle.snapshotId());
+        Optional<DucklakePartitionSpec> activePartitionSpec = partitionSpecs.isEmpty()
+                ? Optional.empty()
+                : Optional.of(partitionSpecs.getLast());
+
+        String tableDataPath = resolveTableDataPath(handle.schemaName(), handle.tableName(), handle.snapshotId());
+
+        DucklakeWritableTableHandle insertHandle = new DucklakeWritableTableHandle(
+                handle.schemaName(),
+                handle.tableName(),
+                handle.tableId(),
+                ducklakeColumns,
+                allCatalogColumns,
+                tableDataPath,
+                activePartitionSpec,
+                temporalPartitionEncoding);
+
+        // Build data file ranges for row ID → data file resolution
+        List<DucklakeDataFile> dataFiles = catalog.getDataFiles(handle.tableId(), handle.snapshotId());
+        List<DucklakeMergeTableHandle.DataFileRange> dataFileRanges = dataFiles.stream()
+                .map(df -> new DucklakeMergeTableHandle.DataFileRange(df.dataFileId(), df.rowIdStart(), df.recordCount()))
+                .collect(toImmutableList());
+
+        return new DucklakeMergeTableHandle(handle, insertHandle, dataFileRanges);
+    }
+
+    @Override
+    public void finishMerge(
+            ConnectorSession session,
+            ConnectorMergeTableHandle mergeTableHandle,
+            List<ConnectorTableHandle> sourceTableHandles,
+            Collection<Slice> fragments,
+            Collection<ComputedStatistics> computedStatistics)
+    {
+        DucklakeMergeTableHandle mergeHandle = (DucklakeMergeTableHandle) mergeTableHandle;
+        DucklakeTableHandle tableHandle = mergeHandle.tableHandle();
+
+        List<DucklakeDeleteFragment> deleteFragments = new ArrayList<>();
+        List<DucklakeWriteFragment> insertFragments = new ArrayList<>();
+
+        for (Slice fragment : fragments) {
+            byte[] bytes = fragment.getBytes();
+            // Try to parse as delete fragment first, fall back to write fragment
+            try {
+                DucklakeDeleteFragment deleteFragment = deleteFragmentCodec.fromJson(bytes);
+                // Verify it's actually a delete fragment (has dataFileId > 0 and path starts with "ducklake-delete-")
+                if (deleteFragment.path().startsWith("ducklake-delete-")) {
+                    deleteFragments.add(deleteFragment);
+                    continue;
+                }
+            }
+            catch (RuntimeException _) {
+                // Not a delete fragment
+            }
+            try {
+                insertFragments.add(fragmentCodec.fromJson(bytes));
+            }
+            catch (RuntimeException e) {
+                throw new RuntimeException("Failed to deserialize merge fragment", e);
+            }
+        }
+
+        // Commit atomically in a single snapshot — critical for UPDATE (delete+insert must be atomic)
+        if (!deleteFragments.isEmpty() && !insertFragments.isEmpty()) {
+            catalog.commitMerge(tableHandle.tableId(), tableHandle.schemaName(), tableHandle.tableName(), deleteFragments, insertFragments);
+        }
+        else if (!deleteFragments.isEmpty()) {
+            catalog.commitDelete(tableHandle.tableId(), tableHandle.schemaName(), tableHandle.tableName(), deleteFragments);
+        }
+        else if (!insertFragments.isEmpty()) {
+            catalog.commitInsert(tableHandle.tableId(), tableHandle.schemaName(), tableHandle.tableName(), insertFragments);
+        }
     }
 
     // ==================== View operations ====================

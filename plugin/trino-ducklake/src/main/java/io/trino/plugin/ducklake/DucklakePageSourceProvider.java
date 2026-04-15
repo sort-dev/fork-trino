@@ -42,6 +42,7 @@ import io.trino.plugin.ducklake.catalog.DucklakeSnapshot;
 import io.trino.plugin.ducklake.catalog.DucklakeSnapshotChange;
 import io.trino.plugin.hive.TransformConnectorPageSource;
 import io.trino.plugin.hive.parquet.ParquetPageSource;
+import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ColumnHandle;
@@ -406,13 +407,25 @@ public class DucklakePageSourceProvider
                     Domain.DEFAULT_COMPACTION_THRESHOLD,
                     parquetReaderOptions);
 
+            // Separate out the synthetic $row_id column (used for DELETE/UPDATE/MERGE)
+            int rowIdOutputPosition = -1;
+            List<DucklakeColumnHandle> fileColumns = new ArrayList<>();
+            for (int i = 0; i < columns.size(); i++) {
+                if (columns.get(i).isRowIdColumn()) {
+                    rowIdOutputPosition = i;
+                }
+                else {
+                    fileColumns.add(columns.get(i));
+                }
+            }
+
             // Build list of columns to read, handling missing columns for schema evolution
             ImmutableList.Builder<Column> parquetColumns = ImmutableList.builder();
             MessageColumnIO messageColumnIO = getColumnIO(fileSchema, fileSchema);
             TransformConnectorPageSource.Builder transforms = TransformConnectorPageSource.builder();
             int parquetColumnOrdinal = 0;
 
-            for (DucklakeColumnHandle column : columns) {
+            for (DucklakeColumnHandle column : fileColumns) {
                 String columnName = column.columnName();
                 ColumnIO columnIO = messageColumnIO.getChild(columnName);
 
@@ -457,6 +470,12 @@ public class DucklakePageSourceProvider
             // then apply merge-on-read delete filtering if present
             ConnectorPageSource pageSource = new ParquetPageSource(parquetReader);
             pageSource = transforms.build(pageSource);
+
+            // Inject $row_id column before delete filtering so row IDs reflect original file positions
+            if (rowIdOutputPosition >= 0) {
+                pageSource = new RowIdInjectingPageSource(pageSource, fileColumns.size(), rowIdOutputPosition, split.rowIdStart());
+            }
+
             pageSource = applyDeleteFile(fileSystem, split, pageSource);
 
             log.debug("Created Parquet page source for %d columns from file: %s",
@@ -482,26 +501,30 @@ public class DucklakePageSourceProvider
     private ConnectorPageSource applyDeleteFile(TrinoFileSystem fileSystem, DucklakeSplit split, ConnectorPageSource dataSource)
             throws IOException
     {
-        if (split.deleteFilePath().isEmpty()) {
+        if (split.deleteFilePaths().isEmpty()) {
             return dataSource;
         }
 
-        Set<Long> deletedRows = readDeletedRows(fileSystem, split);
+        // Read all delete files and merge their row ID sets
+        Set<Long> deletedRows = new HashSet<>();
+        for (String deleteFilePath : split.deleteFilePaths()) {
+            deletedRows.addAll(readDeletedRowsFromFile(fileSystem, deleteFilePath, split));
+        }
+
         if (deletedRows.isEmpty()) {
             return dataSource;
         }
 
-        log.debug("Applying delete file %s with %d deleted rows for data file %s",
-                split.deleteFilePath().orElseThrow(),
+        log.debug("Applying %d delete file(s) with %d total deleted rows for data file %s",
+                split.deleteFilePaths().size(),
                 deletedRows.size(),
                 split.dataFilePath());
         return TransformConnectorPageSource.create(dataSource, new DeleteRowFilterTransform(deletedRows, split.rowIdStart()));
     }
 
-    private Set<Long> readDeletedRows(TrinoFileSystem fileSystem, DucklakeSplit split)
+    private Set<Long> readDeletedRowsFromFile(TrinoFileSystem fileSystem, String deleteFilePath, DucklakeSplit split)
             throws IOException
     {
-        String deleteFilePath = split.deleteFilePath().orElseThrow();
         TrinoInputFile inputFile = fileSystem.newInputFile(toLocation(deleteFilePath));
 
         AggregatedMemoryContext memoryContext = newSimpleAggregatedMemoryContext();
@@ -724,6 +747,101 @@ public class DucklakePageSourceProvider
             }
             page.selectPositions(retainedPositions, 0, retainedCount);
             return page;
+        }
+    }
+
+    /**
+     * Wraps a ConnectorPageSource and injects a synthetic $row_id BIGINT column.
+     * The row ID is computed as rowIdStart + (cumulative file position).
+     * This must be applied BEFORE delete file filtering so the IDs match original file positions.
+     */
+    private static final class RowIdInjectingPageSource
+            implements ConnectorPageSource
+    {
+        private final ConnectorPageSource delegate;
+        private final int delegateChannelCount;
+        private final int rowIdOutputPosition;
+        private final long rowIdStart;
+        private long nextRowOffset;
+
+        RowIdInjectingPageSource(ConnectorPageSource delegate, int delegateChannelCount, int rowIdOutputPosition, long rowIdStart)
+        {
+            this.delegate = requireNonNull(delegate, "delegate is null");
+            this.delegateChannelCount = delegateChannelCount;
+            this.rowIdOutputPosition = rowIdOutputPosition;
+            this.rowIdStart = rowIdStart;
+        }
+
+        @Override
+        public long getCompletedBytes()
+        {
+            return delegate.getCompletedBytes();
+        }
+
+        @Override
+        public OptionalLong getCompletedPositions()
+        {
+            return delegate.getCompletedPositions();
+        }
+
+        @Override
+        public long getReadTimeNanos()
+        {
+            return delegate.getReadTimeNanos();
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return delegate.isFinished();
+        }
+
+        @Override
+        public SourcePage getNextSourcePage()
+        {
+            SourcePage sourcePage = delegate.getNextSourcePage();
+            if (sourcePage == null) {
+                return null;
+            }
+
+            int positionCount = sourcePage.getPositionCount();
+
+            // Build the row ID block
+            io.trino.spi.block.BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, positionCount);
+            for (int i = 0; i < positionCount; i++) {
+                BIGINT.writeLong(blockBuilder, rowIdStart + nextRowOffset + i);
+            }
+            nextRowOffset += positionCount;
+            Block rowIdBlock = blockBuilder.build();
+
+            // Build a new page with the row ID block inserted at the correct position
+            int totalChannels = delegateChannelCount + 1;
+            Block[] blocks = new Block[totalChannels];
+            int srcChannel = 0;
+            for (int i = 0; i < totalChannels; i++) {
+                if (i == rowIdOutputPosition) {
+                    blocks[i] = rowIdBlock;
+                }
+                else {
+                    blocks[i] = sourcePage.getBlock(srcChannel);
+                    srcChannel++;
+                }
+            }
+
+            return SourcePage.create(new Page(positionCount, blocks));
+        }
+
+        @Override
+        public long getMemoryUsage()
+        {
+            return delegate.getMemoryUsage();
+        }
+
+        @Override
+        public void close()
+                throws IOException
+        {
+            delegate.close();
         }
     }
 }

@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.ducklake.catalog;
 
+import io.trino.plugin.ducklake.DucklakeDeleteFragment;
 import io.trino.plugin.ducklake.DucklakeWriteFragment;
 import io.trino.spi.connector.SchemaTableName;
 
@@ -173,6 +174,19 @@ public interface DucklakeCatalog
      * and updated table stats.
      */
     void commitInsert(long tableId, String schemaName, String tableName, List<DucklakeWriteFragment> fragments);
+
+    /**
+     * Commit delete files for a table.
+     * Creates a new snapshot with ducklake_delete_file rows and updated table stats.
+     */
+    void commitDelete(long tableId, String schemaName, String tableName, List<DucklakeDeleteFragment> deleteFragments);
+
+    /**
+     * Atomically commit both delete files and inserted data files in a single snapshot.
+     * Used for UPDATE (delete old rows + insert new rows) and MERGE operations.
+     */
+    void commitMerge(long tableId, String schemaName, String tableName,
+            List<DucklakeDeleteFragment> deleteFragments, List<DucklakeWriteFragment> insertFragments);
 
     // ==================== View operations ====================
 

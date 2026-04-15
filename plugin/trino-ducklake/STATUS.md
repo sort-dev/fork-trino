@@ -112,9 +112,20 @@ Cross-engine validation (Trino writes -> DuckDB reads, PostgreSQL catalog):
 - Catalog metadata operations: SHOW TABLES, DESCRIBE, row counts all correct
 - Column value reads: DuckDB correctly reads all values from Trino-written Parquet files
 
+### Row-level mutations (DELETE, UPDATE, MERGE)
+
+Implemented via Trino's merge-on-read pattern (`ConnectorMergeSink`):
+
+- `DELETE`: writes Parquet delete files containing row IDs, committed to `ducklake_delete_file` metadata table.
+  Supports multiple delete files per data file (accumulated across snapshots, merged at read time).
+- `UPDATE`: implemented as atomic delete+insert in a single snapshot via `commitMerge`.
+- `MERGE INTO`: supports `WHEN MATCHED THEN UPDATE/DELETE`, `WHEN NOT MATCHED THEN INSERT` — all in one atomic snapshot.
+- `$row_id` synthetic column injected by `RowIdInjectingPageSource` for row identification during merge scans.
+- `DucklakeMergeSink` groups deleted row IDs by data file, writes per-file Parquet delete files.
+- Snapshot changes use spec-compliant comma-separated format (one row per snapshot).
+
 ### Not yet implemented
 
-- `DELETE`, `UPDATE`, `MERGE` (row-level mutations)
 - `ALTER TABLE` family
 - Commit-failure file cleanup (abort cleanup exists; orphaned files from commit failures are cleaned by DuckLake's `ducklake_delete_orphaned_files()` maintenance procedure)
 - Maintenance operations (optimize, rewrite, expire snapshots, etc.)
@@ -125,7 +136,8 @@ Cross-engine validation (Trino writes -> DuckDB reads, PostgreSQL catalog):
 - All tests use **PostgreSQL** backend (via Testcontainers, requires Docker)
 - DDL: `TestDucklakeDDLIntegration` (12 tests)
 - Data writes: `TestDucklakeWriteIntegration` (25 tests, including 6 partitioned write tests), `TestDucklakeWriteFragment` (5 tests), `TestDucklakeStatsExtractor` (12 tests)
+- Row-level mutations: `TestDucklakeDeleteIntegration` (25 tests: 15 DELETE, 5 UPDATE, 5 MERGE)
 - Cross-engine: `TestDucklakeCrossEngineCompatibility` (10 tests, all enabled)
 - Parquet schema: `TestDucklakeParquetSchemaBuilder` (6 tests)
 - Partition computation: `TestDucklakePartitionComputer` (18 tests, both calendar/epoch encodings)
-- Total: 385 tests pass, 0 failures, 7 skipped
+- Total: 410 tests pass, 0 failures, 7 skipped

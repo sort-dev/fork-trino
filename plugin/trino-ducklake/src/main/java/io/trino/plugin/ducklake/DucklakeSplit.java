@@ -34,7 +34,7 @@ import static java.util.Objects.requireNonNull;
  */
 public record DucklakeSplit(
         @JsonProperty("dataFilePath") String dataFilePath,
-        @JsonProperty("deleteFilePath") Optional<String> deleteFilePath,
+        @JsonProperty("deleteFilePaths") List<String> deleteFilePaths,
         @JsonProperty("rowIdStart") long rowIdStart,
         @JsonProperty("recordCount") long recordCount,
         @JsonProperty("fileSizeBytes") long fileSizeBytes,
@@ -48,9 +48,19 @@ public record DucklakeSplit(
     public DucklakeSplit
     {
         requireNonNull(dataFilePath, "dataFilePath is null");
-        requireNonNull(deleteFilePath, "deleteFilePath is null");
+        requireNonNull(deleteFilePaths, "deleteFilePaths is null");
+        deleteFilePaths = List.copyOf(deleteFilePaths);
         requireNonNull(fileFormat, "fileFormat is null");
         requireNonNull(fileStatisticsDomain, "fileStatisticsDomain is null");
+    }
+
+    /**
+     * Backward-compatible accessor for the single delete file path.
+     * Returns the first delete file path if present.
+     */
+    public Optional<String> deleteFilePath()
+    {
+        return deleteFilePaths.isEmpty() ? Optional.empty() : Optional.of(deleteFilePaths.getFirst());
     }
 
     @Override
@@ -72,7 +82,7 @@ public record DucklakeSplit(
     {
         return INSTANCE_SIZE
                 + estimatedSizeOf(dataFilePath)
-                + deleteFilePath.map(SizeOf::estimatedSizeOf).orElse(0L)
+                + deleteFilePaths.stream().mapToLong(SizeOf::estimatedSizeOf).sum()
                 + (SIZE_OF_LONG * 3) // rowIdStart, recordCount, fileSizeBytes
                 + estimatedSizeOf(fileFormat)
                 + fileStatisticsDomain.getRetainedSizeInBytes(DucklakeColumnHandle::getRetainedSizeInBytes);

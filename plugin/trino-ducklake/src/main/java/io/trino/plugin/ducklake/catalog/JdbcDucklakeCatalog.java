@@ -18,6 +18,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import io.airlift.log.Logger;
 import io.trino.plugin.ducklake.DucklakeConfig;
+import io.trino.plugin.ducklake.DucklakeDeleteFragment;
 import io.trino.plugin.ducklake.DucklakeFileColumnStats;
 import io.trino.plugin.ducklake.DucklakeWriteFragment;
 import io.trino.spi.connector.SchemaTableName;
@@ -991,12 +992,13 @@ public class JdbcDucklakeCatalog
                     }
                 }
 
-                // 5. Insert snapshot changes
-                for (String change : tx.getChanges()) {
+                // 5. Insert snapshot changes (comma-separated per spec, one row per snapshot)
+                if (!tx.getChanges().isEmpty()) {
+                    String changesMade = String.join(",", tx.getChanges());
                     try (PreparedStatement stmt = conn.prepareStatement(
                             "INSERT INTO ducklake_snapshot_changes (snapshot_id, changes_made) VALUES (?, ?)")) {
                         stmt.setLong(1, tx.getNewSnapshotId());
-                        stmt.setString(2, change);
+                        stmt.setString(2, changesMade);
                         stmt.executeUpdate();
                     }
                 }
@@ -1290,207 +1292,281 @@ public class JdbcDucklakeCatalog
         }
 
         executeWriteTransaction("insert into " + schemaName + "." + tableName, tx -> {
-            // Read current table stats (may not exist yet — DuckDB creates them on first insert)
-            long currentNextRowId = 0;
-            long currentRecordCount = 0;
-            long currentFileSizeBytes = 0;
-            boolean tableStatsExist;
+            applyInsertFragments(tx, tableId, fragments);
+            tx.addChange("inserted_into_table:" + tableId);
+        });
+    }
+
+    private void applyInsertFragments(DucklakeWriteTransaction tx, long tableId, List<DucklakeWriteFragment> fragments)
+            throws SQLException
+    {
+        // Read current table stats (may not exist yet — DuckDB creates them on first insert)
+        long currentNextRowId = 0;
+        long currentRecordCount = 0;
+        long currentFileSizeBytes = 0;
+        boolean tableStatsExist;
+        try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                "SELECT record_count, next_row_id, file_size_bytes FROM ducklake_table_stats WHERE table_id = ?")) {
+            stmt.setLong(1, tableId);
+            try (ResultSet rs = stmt.executeQuery()) {
+                tableStatsExist = rs.next();
+                if (tableStatsExist) {
+                    currentRecordCount = rs.getLong("record_count");
+                    currentNextRowId = rs.getLong("next_row_id");
+                    currentFileSizeBytes = rs.getLong("file_size_bytes");
+                }
+            }
+        }
+
+        long runningRowId = currentNextRowId;
+        long totalRecords = 0;
+        long totalFileSize = 0;
+
+        for (DucklakeWriteFragment fragment : fragments) {
+            long dataFileId = tx.allocateFileId();
+
+            // Insert ducklake_data_file
             try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                    "SELECT record_count, next_row_id, file_size_bytes FROM ducklake_table_stats WHERE table_id = ?")) {
-                stmt.setLong(1, tableId);
-                try (ResultSet rs = stmt.executeQuery()) {
-                    tableStatsExist = rs.next();
-                    if (tableStatsExist) {
-                        currentRecordCount = rs.getLong("record_count");
-                        currentNextRowId = rs.getLong("next_row_id");
-                        currentFileSizeBytes = rs.getLong("file_size_bytes");
+                    "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, " +
+                            "file_order, path, path_is_relative, file_format, record_count, file_size_bytes, " +
+                            "footer_size, row_id_start, partition_id) " +
+                            "VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, ?, ?, ?)")) {
+                stmt.setLong(1, dataFileId);
+                stmt.setLong(2, tableId);
+                stmt.setLong(3, tx.getNewSnapshotId());
+                stmt.setNull(4, java.sql.Types.BIGINT); // file_order: NULL matches DuckDB convention
+                stmt.setString(5, fragment.path());
+                stmt.setLong(6, fragment.recordCount());
+                stmt.setLong(7, fragment.fileSizeBytes());
+                stmt.setLong(8, fragment.footerSize());
+                stmt.setLong(9, runningRowId);
+                if (fragment.partitionId().isPresent()) {
+                    stmt.setLong(10, fragment.partitionId().getAsLong());
+                }
+                else {
+                    stmt.setNull(10, java.sql.Types.BIGINT);
+                }
+                stmt.executeUpdate();
+            }
+
+            // Insert ducklake_file_partition_value rows for partitioned files
+            if (!fragment.partitionValues().isEmpty()) {
+                try (PreparedStatement pvStmt = tx.getConnection().prepareStatement(
+                        "INSERT INTO ducklake_file_partition_value (table_id, data_file_id, partition_key_index, partition_value) " +
+                                "VALUES (?, ?, ?, ?)")) {
+                    for (Map.Entry<Integer, String> pv : fragment.partitionValues().entrySet()) {
+                        pvStmt.setLong(1, tableId);
+                        pvStmt.setLong(2, dataFileId);
+                        pvStmt.setInt(3, pv.getKey());
+                        if (pv.getValue() != null) {
+                            pvStmt.setString(4, pv.getValue());
+                        }
+                        else {
+                            pvStmt.setNull(4, java.sql.Types.VARCHAR);
+                        }
+                        pvStmt.addBatch();
                     }
+                    pvStmt.executeBatch();
                 }
             }
 
-            long runningRowId = currentNextRowId;
-            long totalRecords = 0;
-            long totalFileSize = 0;
-
-            for (DucklakeWriteFragment fragment : fragments) {
-                long dataFileId = tx.allocateFileId();
-
-                // Insert ducklake_data_file
+            // Insert ducklake_file_column_stats per column
+            for (DucklakeFileColumnStats colStats : fragment.columnStats()) {
                 try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                        "INSERT INTO ducklake_data_file (data_file_id, table_id, begin_snapshot, end_snapshot, " +
-                                "file_order, path, path_is_relative, file_format, record_count, file_size_bytes, " +
-                                "footer_size, row_id_start, partition_id) " +
-                                "VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, ?, ?, ?)")) {
+                        "INSERT INTO ducklake_file_column_stats (data_file_id, table_id, column_id, " +
+                                "column_size_bytes, value_count, null_count, min_value, max_value, contains_nan) " +
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
                     stmt.setLong(1, dataFileId);
                     stmt.setLong(2, tableId);
-                    stmt.setLong(3, tx.getNewSnapshotId());
-                    stmt.setNull(4, java.sql.Types.BIGINT); // file_order: NULL matches DuckDB convention
-                    stmt.setString(5, fragment.path());
-                    stmt.setLong(6, fragment.recordCount());
-                    stmt.setLong(7, fragment.fileSizeBytes());
-                    stmt.setLong(8, fragment.footerSize());
-                    stmt.setLong(9, runningRowId);
-                    if (fragment.partitionId().isPresent()) {
-                        stmt.setLong(10, fragment.partitionId().getAsLong());
+                    stmt.setLong(3, colStats.columnId());
+                    stmt.setLong(4, colStats.columnSizeBytes());
+                    stmt.setLong(5, colStats.valueCount());
+                    stmt.setLong(6, colStats.nullCount());
+                    if (colStats.minValue().isPresent()) {
+                        stmt.setString(7, colStats.minValue().get());
                     }
                     else {
-                        stmt.setNull(10, java.sql.Types.BIGINT);
+                        stmt.setNull(7, java.sql.Types.VARCHAR);
+                    }
+                    if (colStats.maxValue().isPresent()) {
+                        stmt.setString(8, colStats.maxValue().get());
+                    }
+                    else {
+                        stmt.setNull(8, java.sql.Types.VARCHAR);
+                    }
+                    if (colStats.containsNan()) {
+                        stmt.setBoolean(9, true);
+                    }
+                    else {
+                        stmt.setNull(9, java.sql.Types.BOOLEAN);
                     }
                     stmt.executeUpdate();
                 }
-
-                // Insert ducklake_file_partition_value rows for partitioned files
-                if (!fragment.partitionValues().isEmpty()) {
-                    try (PreparedStatement pvStmt = tx.getConnection().prepareStatement(
-                            "INSERT INTO ducklake_file_partition_value (table_id, data_file_id, partition_key_index, partition_value) " +
-                                    "VALUES (?, ?, ?, ?)")) {
-                        for (Map.Entry<Integer, String> pv : fragment.partitionValues().entrySet()) {
-                            pvStmt.setLong(1, tableId);
-                            pvStmt.setLong(2, dataFileId);
-                            pvStmt.setInt(3, pv.getKey());
-                            if (pv.getValue() != null) {
-                                pvStmt.setString(4, pv.getValue());
-                            }
-                            else {
-                                pvStmt.setNull(4, java.sql.Types.VARCHAR);
-                            }
-                            pvStmt.addBatch();
-                        }
-                        pvStmt.executeBatch();
-                    }
-                }
-
-                // Insert ducklake_file_column_stats per column
-                for (DucklakeFileColumnStats colStats : fragment.columnStats()) {
-                    try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                            "INSERT INTO ducklake_file_column_stats (data_file_id, table_id, column_id, " +
-                                    "column_size_bytes, value_count, null_count, min_value, max_value, contains_nan) " +
-                                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
-                        stmt.setLong(1, dataFileId);
-                        stmt.setLong(2, tableId);
-                        stmt.setLong(3, colStats.columnId());
-                        stmt.setLong(4, colStats.columnSizeBytes());
-                        stmt.setLong(5, colStats.valueCount());
-                        stmt.setLong(6, colStats.nullCount());
-                        if (colStats.minValue().isPresent()) {
-                            stmt.setString(7, colStats.minValue().get());
-                        }
-                        else {
-                            stmt.setNull(7, java.sql.Types.VARCHAR);
-                        }
-                        if (colStats.maxValue().isPresent()) {
-                            stmt.setString(8, colStats.maxValue().get());
-                        }
-                        else {
-                            stmt.setNull(8, java.sql.Types.VARCHAR);
-                        }
-                        if (colStats.containsNan()) {
-                            stmt.setBoolean(9, true);
-                        }
-                        else {
-                            stmt.setNull(9, java.sql.Types.BOOLEAN);
-                        }
-                        stmt.executeUpdate();
-                    }
-                }
-
-                runningRowId += fragment.recordCount();
-                totalRecords += fragment.recordCount();
-                totalFileSize += fragment.fileSizeBytes();
             }
 
-            // Insert or update ducklake_table_stats
-            if (tableStatsExist) {
+            runningRowId += fragment.recordCount();
+            totalRecords += fragment.recordCount();
+            totalFileSize += fragment.fileSizeBytes();
+        }
+
+        // Insert or update ducklake_table_stats
+        if (tableStatsExist) {
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "UPDATE ducklake_table_stats SET record_count = ?, next_row_id = ?, file_size_bytes = ? WHERE table_id = ?")) {
+                stmt.setLong(1, currentRecordCount + totalRecords);
+                stmt.setLong(2, currentNextRowId + totalRecords);
+                stmt.setLong(3, currentFileSizeBytes + totalFileSize);
+                stmt.setLong(4, tableId);
+                stmt.executeUpdate();
+            }
+        }
+        else {
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "INSERT INTO ducklake_table_stats (table_id, record_count, next_row_id, file_size_bytes) VALUES (?, ?, ?, ?)")) {
+                stmt.setLong(1, tableId);
+                stmt.setLong(2, totalRecords);
+                stmt.setLong(3, totalRecords);
+                stmt.setLong(4, totalFileSize);
+                stmt.executeUpdate();
+            }
+        }
+
+        // Upsert ducklake_table_column_stats: aggregate min/max/null across all fragments per column
+        Map<Long, AggregatedColumnStats> columnAggregates = new LinkedHashMap<>();
+        for (DucklakeWriteFragment fragment : fragments) {
+            for (DucklakeFileColumnStats colStats : fragment.columnStats()) {
+                columnAggregates.computeIfAbsent(colStats.columnId(), id -> new AggregatedColumnStats())
+                        .merge(colStats);
+            }
+        }
+
+        for (Map.Entry<Long, AggregatedColumnStats> entry : columnAggregates.entrySet()) {
+            long columnId = entry.getKey();
+            AggregatedColumnStats agg = entry.getValue();
+
+            // Check if row exists already (from prior insert)
+            boolean exists;
+            try (PreparedStatement check = tx.getConnection().prepareStatement(
+                    "SELECT 1 FROM ducklake_table_column_stats WHERE table_id = ? AND column_id = ?")) {
+                check.setLong(1, tableId);
+                check.setLong(2, columnId);
+                try (ResultSet rs = check.executeQuery()) {
+                    exists = rs.next();
+                }
+            }
+
+            if (exists) {
+                // Merge with existing: widen min/max, OR contains_null/contains_nan
                 try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                        "UPDATE ducklake_table_stats SET record_count = ?, next_row_id = ?, file_size_bytes = ? WHERE table_id = ?")) {
-                    stmt.setLong(1, currentRecordCount + totalRecords);
-                    stmt.setLong(2, currentNextRowId + totalRecords);
-                    stmt.setLong(3, currentFileSizeBytes + totalFileSize);
-                    stmt.setLong(4, tableId);
+                        "UPDATE ducklake_table_column_stats SET " +
+                                "contains_null = (contains_null OR ?), " +
+                                "contains_nan = (contains_nan OR ?), " +
+                                "min_value = CASE WHEN min_value IS NULL THEN ? WHEN ? IS NULL THEN min_value WHEN ? < min_value THEN ? ELSE min_value END, " +
+                                "max_value = CASE WHEN max_value IS NULL THEN ? WHEN ? IS NULL THEN max_value WHEN ? > max_value THEN ? ELSE max_value END " +
+                                "WHERE table_id = ? AND column_id = ?")) {
+                    stmt.setBoolean(1, agg.containsNull);
+                    stmt.setBoolean(2, agg.containsNan);
+                    setNullableString(stmt, 3, agg.minValue);
+                    setNullableString(stmt, 4, agg.minValue);
+                    setNullableString(stmt, 5, agg.minValue);
+                    setNullableString(stmt, 6, agg.minValue);
+                    setNullableString(stmt, 7, agg.maxValue);
+                    setNullableString(stmt, 8, agg.maxValue);
+                    setNullableString(stmt, 9, agg.maxValue);
+                    setNullableString(stmt, 10, agg.maxValue);
+                    stmt.setLong(11, tableId);
+                    stmt.setLong(12, columnId);
                     stmt.executeUpdate();
                 }
             }
             else {
                 try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                        "INSERT INTO ducklake_table_stats (table_id, record_count, next_row_id, file_size_bytes) VALUES (?, ?, ?, ?)")) {
+                        "INSERT INTO ducklake_table_column_stats (table_id, column_id, contains_null, contains_nan, min_value, max_value) " +
+                                "VALUES (?, ?, ?, ?, ?, ?)")) {
                     stmt.setLong(1, tableId);
-                    stmt.setLong(2, totalRecords);
-                    stmt.setLong(3, totalRecords);
-                    stmt.setLong(4, totalFileSize);
+                    stmt.setLong(2, columnId);
+                    stmt.setBoolean(3, agg.containsNull);
+                    if (agg.containsNan) {
+                        stmt.setBoolean(4, true);
+                    }
+                    else {
+                        stmt.setNull(4, java.sql.Types.BOOLEAN);
+                    }
+                    setNullableString(stmt, 5, agg.minValue);
+                    setNullableString(stmt, 6, agg.maxValue);
                     stmt.executeUpdate();
                 }
             }
+        }
+    }
 
-            // Upsert ducklake_table_column_stats: aggregate min/max/null across all fragments per column
-            Map<Long, AggregatedColumnStats> columnAggregates = new LinkedHashMap<>();
-            for (DucklakeWriteFragment fragment : fragments) {
-                for (DucklakeFileColumnStats colStats : fragment.columnStats()) {
-                    columnAggregates.computeIfAbsent(colStats.columnId(), id -> new AggregatedColumnStats())
-                            .merge(colStats);
-                }
-            }
+    @Override
+    public void commitDelete(long tableId, String schemaName, String tableName, List<DucklakeDeleteFragment> deleteFragments)
+    {
+        if (deleteFragments.isEmpty()) {
+            return;
+        }
 
-            for (Map.Entry<Long, AggregatedColumnStats> entry : columnAggregates.entrySet()) {
-                long columnId = entry.getKey();
-                AggregatedColumnStats agg = entry.getValue();
-
-                // Check if row exists already (from prior insert)
-                boolean exists;
-                try (PreparedStatement check = tx.getConnection().prepareStatement(
-                        "SELECT 1 FROM ducklake_table_column_stats WHERE table_id = ? AND column_id = ?")) {
-                    check.setLong(1, tableId);
-                    check.setLong(2, columnId);
-                    try (ResultSet rs = check.executeQuery()) {
-                        exists = rs.next();
-                    }
-                }
-
-                if (exists) {
-                    // Merge with existing: widen min/max, OR contains_null/contains_nan
-                    try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                            "UPDATE ducklake_table_column_stats SET " +
-                                    "contains_null = (contains_null OR ?), " +
-                                    "contains_nan = (contains_nan OR ?), " +
-                                    "min_value = CASE WHEN min_value IS NULL THEN ? WHEN ? IS NULL THEN min_value WHEN ? < min_value THEN ? ELSE min_value END, " +
-                                    "max_value = CASE WHEN max_value IS NULL THEN ? WHEN ? IS NULL THEN max_value WHEN ? > max_value THEN ? ELSE max_value END " +
-                                    "WHERE table_id = ? AND column_id = ?")) {
-                        stmt.setBoolean(1, agg.containsNull);
-                        stmt.setBoolean(2, agg.containsNan);
-                        setNullableString(stmt, 3, agg.minValue);
-                        setNullableString(stmt, 4, agg.minValue);
-                        setNullableString(stmt, 5, agg.minValue);
-                        setNullableString(stmt, 6, agg.minValue);
-                        setNullableString(stmt, 7, agg.maxValue);
-                        setNullableString(stmt, 8, agg.maxValue);
-                        setNullableString(stmt, 9, agg.maxValue);
-                        setNullableString(stmt, 10, agg.maxValue);
-                        stmt.setLong(11, tableId);
-                        stmt.setLong(12, columnId);
-                        stmt.executeUpdate();
-                    }
-                }
-                else {
-                    try (PreparedStatement stmt = tx.getConnection().prepareStatement(
-                            "INSERT INTO ducklake_table_column_stats (table_id, column_id, contains_null, contains_nan, min_value, max_value) " +
-                                    "VALUES (?, ?, ?, ?, ?, ?)")) {
-                        stmt.setLong(1, tableId);
-                        stmt.setLong(2, columnId);
-                        stmt.setBoolean(3, agg.containsNull);
-                        if (agg.containsNan) {
-                            stmt.setBoolean(4, true);
-                        }
-                        else {
-                            stmt.setNull(4, java.sql.Types.BOOLEAN);
-                        }
-                        setNullableString(stmt, 5, agg.minValue);
-                        setNullableString(stmt, 6, agg.maxValue);
-                        stmt.executeUpdate();
-                    }
-                }
-            }
-
-            tx.addChange("inserted_into_table:" + tableId);
+        executeWriteTransaction("delete from " + schemaName + "." + tableName, tx -> {
+            applyDeleteFragments(tx, tableId, deleteFragments);
+            tx.addChange("deleted_from_table:" + tableId);
         });
+    }
+
+    @Override
+    public void commitMerge(long tableId, String schemaName, String tableName,
+            List<DucklakeDeleteFragment> deleteFragments, List<DucklakeWriteFragment> insertFragments)
+    {
+        if (deleteFragments.isEmpty() && insertFragments.isEmpty()) {
+            return;
+        }
+
+        executeWriteTransaction("merge into " + schemaName + "." + tableName, tx -> {
+            if (!deleteFragments.isEmpty()) {
+                applyDeleteFragments(tx, tableId, deleteFragments);
+                tx.addChange("deleted_from_table:" + tableId);
+            }
+            if (!insertFragments.isEmpty()) {
+                applyInsertFragments(tx, tableId, insertFragments);
+                tx.addChange("inserted_into_table:" + tableId);
+            }
+        });
+    }
+
+    private void applyDeleteFragments(DucklakeWriteTransaction tx, long tableId, List<DucklakeDeleteFragment> deleteFragments)
+            throws SQLException
+    {
+        long totalDeleteCount = 0;
+
+        for (DucklakeDeleteFragment fragment : deleteFragments) {
+            long deleteFileId = tx.allocateFileId();
+
+            try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                    "INSERT INTO ducklake_delete_file (delete_file_id, table_id, begin_snapshot, end_snapshot, " +
+                            "data_file_id, path, path_is_relative, format, delete_count, file_size_bytes, " +
+                            "footer_size, encryption_key, partial_max) " +
+                            "VALUES (?, ?, ?, NULL, ?, ?, true, 'parquet', ?, ?, ?, NULL, NULL)")) {
+                stmt.setLong(1, deleteFileId);
+                stmt.setLong(2, tableId);
+                stmt.setLong(3, tx.getNewSnapshotId());
+                stmt.setLong(4, fragment.dataFileId());
+                stmt.setString(5, fragment.path());
+                stmt.setLong(6, fragment.deleteCount());
+                stmt.setLong(7, fragment.fileSizeBytes());
+                stmt.setLong(8, fragment.footerSize());
+                stmt.executeUpdate();
+            }
+
+            totalDeleteCount += fragment.deleteCount();
+        }
+
+        // Update table stats: decrement record count
+        try (PreparedStatement stmt = tx.getConnection().prepareStatement(
+                "UPDATE ducklake_table_stats SET record_count = GREATEST(0, record_count - ?) WHERE table_id = ?")) {
+            stmt.setLong(1, totalDeleteCount);
+            stmt.setLong(2, tableId);
+            stmt.executeUpdate();
+        }
     }
 
     private void setUuid(PreparedStatement stmt, int index, String uuid)

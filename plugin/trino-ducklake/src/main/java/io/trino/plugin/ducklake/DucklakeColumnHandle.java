@@ -21,6 +21,7 @@ import io.trino.spi.type.Type;
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -34,6 +35,19 @@ public record DucklakeColumnHandle(
         implements ColumnHandle
 {
     private static final int INSTANCE_SIZE = instanceSize(DucklakeColumnHandle.class);
+
+    public static final long ROW_ID_COLUMN_ID = -100;
+    public static final String ROW_ID_COLUMN_NAME = "$row_id";
+
+    public static DucklakeColumnHandle rowIdColumnHandle()
+    {
+        return new DucklakeColumnHandle(ROW_ID_COLUMN_ID, ROW_ID_COLUMN_NAME, BIGINT, false);
+    }
+
+    public boolean isRowIdColumn()
+    {
+        return columnId == ROW_ID_COLUMN_ID;
+    }
 
     @JsonCreator
     public DucklakeColumnHandle

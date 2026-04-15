@@ -95,7 +95,7 @@ public class TestDucklakePageSourceProvider
 
         DucklakeSplit matchingSplit = new DucklakeSplit(
                 baseSplit.dataFilePath(),
-                baseSplit.deleteFilePath(),
+                baseSplit.deleteFilePaths(),
                 baseSplit.rowIdStart(),
                 baseSplit.recordCount(),
                 baseSplit.fileSizeBytes(),
@@ -103,7 +103,7 @@ public class TestDucklakePageSourceProvider
                 TupleDomain.withColumnDomains(Map.of(priceColumn, Domain.singleValue(DOUBLE, 30.0))));
         DucklakeSplit nonMatchingSplit = new DucklakeSplit(
                 baseSplit.dataFilePath(),
-                baseSplit.deleteFilePath(),
+                baseSplit.deleteFilePaths(),
                 baseSplit.rowIdStart(),
                 baseSplit.recordCount(),
                 baseSplit.fileSizeBytes(),
@@ -132,7 +132,7 @@ public class TestDucklakePageSourceProvider
         DucklakeSplit baseSplit = getSplits(tableHandle).getFirst();
         DucklakeSplit noneSplit = new DucklakeSplit(
                 baseSplit.dataFilePath(),
-                baseSplit.deleteFilePath(),
+                baseSplit.deleteFilePaths(),
                 baseSplit.rowIdStart(),
                 baseSplit.recordCount(),
                 baseSplit.fileSizeBytes(),
@@ -156,7 +156,7 @@ public class TestDucklakePageSourceProvider
         DucklakeColumnHandle missingColumn = new DucklakeColumnHandle(-1, "missing_col", DOUBLE, true);
         DucklakeSplit missingColumnPredicateSplit = new DucklakeSplit(
                 baseSplit.dataFilePath(),
-                baseSplit.deleteFilePath(),
+                baseSplit.deleteFilePaths(),
                 baseSplit.rowIdStart(),
                 baseSplit.recordCount(),
                 baseSplit.fileSizeBytes(),
@@ -183,7 +183,7 @@ public class TestDucklakePageSourceProvider
         DucklakeSplit baseSplit = getSplits(tableHandle).getFirst();
         DucklakeSplit fileUriSplit = new DucklakeSplit(
                 Path.of(baseSplit.dataFilePath()).toUri().toString(),
-                baseSplit.deleteFilePath(),
+                baseSplit.deleteFilePaths(),
                 baseSplit.rowIdStart(),
                 baseSplit.recordCount(),
                 baseSplit.fileSizeBytes(),

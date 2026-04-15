@@ -44,6 +44,7 @@ import io.trino.spi.type.Type;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -136,8 +137,14 @@ public class DucklakeSplitManager
             dataFiles = pruneDataFiles(dataFiles, tableHandle, constraint);
             dataFiles = pruneByPartitionValues(dataFiles, tableHandle);
 
-            parquetSplits = dataFiles.stream()
-                    .map(dataFile -> createSplit(dataFile, tableDataPath, fileStatisticsDomain))
+            // Group by dataFileId to merge multiple delete files per data file
+            // (a data file can accumulate multiple delete files across snapshots)
+            Map<Long, List<DucklakeDataFile>> groupedFiles = new LinkedHashMap<>();
+            for (DucklakeDataFile df : dataFiles) {
+                groupedFiles.computeIfAbsent(df.dataFileId(), _ -> new ArrayList<>()).add(df);
+            }
+            parquetSplits = groupedFiles.values().stream()
+                    .map(group -> createMergedSplit(group, tableDataPath, fileStatisticsDomain))
                     .collect(toImmutableList());
         }
 
@@ -483,22 +490,28 @@ public class DucklakeSplitManager
 
     private record PartitionKeyMapping(int keyIndex, DucklakePartitionTransform transform) {}
 
-    private DucklakeSplit createSplit(DucklakeDataFile dataFile, String tableDataPath, TupleDomain<DucklakeColumnHandle> fileStatisticsDomain)
+    private DucklakeSplit createMergedSplit(List<DucklakeDataFile> dataFileGroup, String tableDataPath, TupleDomain<DucklakeColumnHandle> fileStatisticsDomain)
     {
-        // Resolve the full path for the data file
-        String dataFilePath = pathResolver.resolveFilePath(dataFile.path(), dataFile.pathIsRelative(), tableDataPath);
+        DucklakeDataFile primary = dataFileGroup.getFirst();
+        String dataFilePath = pathResolver.resolveFilePath(primary.path(), primary.pathIsRelative(), tableDataPath);
 
-        // Resolve delete file path if present
-        Optional<String> deleteFilePath = dataFile.deleteFilePath()
-                .map(path -> pathResolver.resolveFilePath(path, dataFile.deleteFilePathIsRelative().orElse(false), tableDataPath));
+        // Collect all delete file paths from the group (multiple delete files for same data file)
+        List<String> deleteFilePaths = dataFileGroup.stream()
+                .filter(df -> df.deleteFilePath().isPresent())
+                .map(df -> pathResolver.resolveFilePath(
+                        df.deleteFilePath().orElseThrow(),
+                        df.deleteFilePathIsRelative().orElse(false),
+                        tableDataPath))
+                .distinct()
+                .collect(toImmutableList());
 
         return new DucklakeSplit(
                 dataFilePath,
-                deleteFilePath,
-                dataFile.rowIdStart(),
-                dataFile.recordCount(),
-                dataFile.fileSizeBytes(),
-                dataFile.fileFormat(),
+                deleteFilePaths,
+                primary.rowIdStart(),
+                primary.recordCount(),
+                primary.fileSizeBytes(),
+                primary.fileFormat(),
                 fileStatisticsDomain);
     }
 

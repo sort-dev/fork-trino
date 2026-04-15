@@ -93,11 +93,11 @@ Still deferred for views:
 
 ## Remaining Milestones
 
-### M6: Row-Level Mutations
+### M6: Row-Level Mutations — Complete
 
-- [ ] `DELETE`: write delete parquet files + metadata rows in `ducklake_delete_file`.
-- [ ] `UPDATE`: implement as delete+insert in one snapshot commit.
-- [ ] `MERGE`: compose insert/delete fragments with conflict checks.
+- [x] `DELETE`: write delete parquet files + metadata rows in `ducklake_delete_file`.
+- [x] `UPDATE`: implement as delete+insert in one atomic snapshot commit via `commitMerge`.
+- [x] `MERGE`: compose insert/delete fragments in one atomic snapshot; supports WHEN MATCHED THEN UPDATE/DELETE and WHEN NOT MATCHED THEN INSERT.
 
 ### M7: ALTER + Hardening
 
@@ -155,6 +155,7 @@ See [REPORT_CROSS_ENGINE_WRITE.md](REPORT_CROSS_ENGINE_WRITE.md) for spec issues
 ### Test suites
 
 - `TestDucklakeWriteIntegration` (25 tests): DDL/DML correctness for unpartitioned and partitioned tables
+- `TestDucklakeDeleteIntegration` (25 tests): DELETE (15), UPDATE (5), MERGE (5) — row-level mutations
 - `TestDucklakeCrossEngineCompatibility` (10 tests): Trino writes -> DuckDB reads round-trips
 - `TestDucklakeParquetSchemaBuilder` (6 tests): Parquet field_id assignment
 - `TestDucklakePartitionComputer` (18 tests): partition value computation, both encodings
@@ -190,7 +191,7 @@ cd plugin/trino-ducklake && ../../mvnw -Dair.check.skip-all -Dtest=TestDucklakeW
 - [x] Calendar and epoch temporal partition encoding supported.
 - [x] 10 cross-engine compatibility tests green (Trino writes -> DuckDB reads).
 - [x] No regressions on existing read-path suites.
-- [x] 385 tests pass, 0 failures.
+- [x] 410 tests pass, 0 failures (including 25 row-level mutation tests).
 
 ## Risk Register
 

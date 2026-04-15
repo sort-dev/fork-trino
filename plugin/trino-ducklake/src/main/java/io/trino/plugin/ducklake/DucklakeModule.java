@@ -87,8 +87,9 @@ public class DucklakeModule
                 .to(ClassLoaderSafeConnectorPageSinkProvider.class)
                 .in(Scopes.SINGLETON);
 
-        // Write fragment codec
+        // Write fragment codecs
         jsonCodecBinder(binder).bindJsonCodec(DucklakeWriteFragment.class);
+        jsonCodecBinder(binder).bindJsonCodec(DucklakeDeleteFragment.class);
 
         // Parquet reader configuration and stats
         binder.bind(FileFormatDataSourceStats.class).in(Scopes.SINGLETON);
