@@ -160,6 +160,12 @@ Snapshot-versioned column modifications via `ducklake_column` begin/end_snapshot
 
 All operations increment schema version and record `altered_table:<id>` in snapshot changes.
 
+### Concurrency / conflict handling
+
+- Write commits now enforce strict optimistic snapshot lineage checks: if `max(snapshot_id)` advanced since the transaction started, commit aborts.
+- Snapshot ID insert races are translated to `TRANSACTION_CONFLICT` instead of surfacing raw duplicate-key SQL errors.
+- Conflict messages include intervening `ducklake_snapshot_changes` (when present) to make stale-base diagnosis explicit.
+
 ### Not yet implemented
 
 - `ALTER TABLE SET TYPE` (type promotion)
@@ -167,7 +173,6 @@ All operations increment schema version and record `altered_table:<id>` in snaps
 - Commit-failure file cleanup (abort cleanup exists; orphaned files from commit failures are cleaned by DuckLake's `ducklake_delete_orphaned_files()` maintenance procedure)
 - Maintenance operations (optimize, rewrite, expire snapshots, etc.)
 - Unsigned integer range validation for cross-engine writes (DuckLake uint* types mapped to larger signed Trino types; no overflow check when writing back)
-- Concurrency/conflict handling (optimistic commit conflict detection)
 
 ### Test coverage
 

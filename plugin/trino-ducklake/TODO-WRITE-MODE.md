@@ -109,7 +109,7 @@ Still deferred for views:
 - [x] Conservative stats resilience guards ("don't be wrong"): unknown stats for delete-file snapshots, suppress column stats for mixed inline+Parquet, and suppress schema-evolved columns with incomplete coverage.
 - [x] Decision: keep strict stats invalidation (no `% changed > N` heuristic) as default for cross-engine safety.
 - [x] Schema evolution metadata alignment (`ducklake_schema_versions`): schema-changing operations append table-scoped rows; inlined schema resolution prefers table-scoped `begin_snapshot` with fallback.
-- [ ] Concurrency/conflict handling (optimistic commit conflict detection using snapshot lineage and changes).
+- [x] Concurrency/conflict handling: strict optimistic checks before snapshot commit, with `TRANSACTION_CONFLICT` on stale lineage and conflict diagnostics from `ducklake_snapshot_changes`.
 - [ ] Performance pass (writer scaling, file size tuning, stats cost).
 
 ### M8: Maintenance Operations (Post-v1)
@@ -209,8 +209,8 @@ cd plugin/trino-ducklake && ../../mvnw -Dair.check.skip-all -Dtest=TestDucklakeW
   Mitigated: side-by-side catalog comparison identified 10 metadata format differences, all fixed.
 - [x] Cross-engine Parquet column mapping:
   Fixed: `DucklakeParquetSchemaBuilder` sets `field_id` on all Parquet fields from DuckLake `column_id`.
-- [ ] Concurrency conflicts:
-  MVP uses strict optimistic single-commit behavior; add retries/conflict codes in M7.
+- [x] Concurrency conflicts:
+  Added strict optimistic conflict detection in write transactions (snapshot-lineage check + duplicate snapshot race translation to `TRANSACTION_CONFLICT`).
 - [ ] Unsigned integer overflow:
   DuckLake `uint*` types are mapped to larger signed Trino types at read time. No range validation on writes from Trino. Low risk: only affects DuckDB-created tables with unsigned types.
 - [ ] Commit-failure file cleanup:

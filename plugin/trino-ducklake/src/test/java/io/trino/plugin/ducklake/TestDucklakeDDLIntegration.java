@@ -14,6 +14,8 @@
 package io.trino.plugin.ducklake;
 
 import io.trino.Session;
+import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
+import io.trino.spi.TrinoException;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
@@ -27,8 +29,14 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static io.trino.plugin.ducklake.DucklakeSessionProperties.READ_SNAPSHOT_ID;
+import static io.trino.spi.StandardErrorCode.TRANSACTION_CONFLICT;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -279,6 +287,58 @@ public class TestDucklakeDDLIntegration
         }
         finally {
             tryDropTable("test_schema.snapshot_test");
+        }
+    }
+
+    @Test
+    public void testConcurrentSchemaCommitsFailWithTransactionConflict()
+            throws Exception
+    {
+        long snapshotBefore = getCurrentSnapshotIdFromCatalog();
+        String schemaOne = "conflict_schema_a_" + snapshotBefore;
+        String schemaTwo = "conflict_schema_b_" + snapshotBefore;
+
+        JdbcDucklakeCatalog catalog = new JdbcDucklakeCatalog(createIsolatedCatalogConfig());
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try (Connection lockConnection = openCatalogConnection()) {
+            lockConnection.setAutoCommit(false);
+            try (PreparedStatement statement = lockConnection.prepareStatement(
+                    "LOCK TABLE ducklake_schema IN ACCESS EXCLUSIVE MODE")) {
+                statement.execute();
+            }
+
+            Future<?> first = executor.submit(() -> catalog.createSchema(schemaOne));
+            Future<?> second = executor.submit(() -> catalog.createSchema(schemaTwo));
+
+            waitForPendingRelationLocks("ducklake_schema", 2);
+            lockConnection.rollback();
+
+            int successCount = 0;
+            int conflictCount = 0;
+            for (Future<?> future : List.of(first, second)) {
+                try {
+                    future.get(30, TimeUnit.SECONDS);
+                    successCount++;
+                }
+                catch (ExecutionException e) {
+                    if (containsTransactionConflict(e)) {
+                        conflictCount++;
+                        continue;
+                    }
+                    throw new AssertionError("Expected a transaction conflict from concurrent schema commit", e);
+                }
+            }
+
+            assertThat(successCount).isEqualTo(1);
+            assertThat(conflictCount).isEqualTo(1);
+            assertThat(getCurrentSnapshotIdFromCatalog()).isEqualTo(snapshotBefore + 1);
+            assertThat(getActiveSchemaCount(schemaOne, schemaTwo)).isEqualTo(1L);
+        }
+        finally {
+            executor.shutdownNow();
+            catalog.close();
+            tryDropSchema(schemaOne);
+            tryDropSchema(schemaTwo);
         }
     }
 
@@ -718,6 +778,79 @@ public class TestDucklakeDDLIntegration
                 assertThat(resultSet.getLong("schema_version")).isEqualTo(row.schemaVersion());
             }
         }
+    }
+
+    private long getActiveSchemaCount(String schemaOne, String schemaTwo)
+            throws Exception
+    {
+        try (Connection connection = openCatalogConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                        "SELECT count(*) FROM ducklake_schema WHERE end_snapshot IS NULL AND schema_name IN (?, ?)")) {
+            statement.setString(1, schemaOne);
+            statement.setString(2, schemaTwo);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    throw new AssertionError("Missing schema count result");
+                }
+                return resultSet.getLong(1);
+            }
+        }
+    }
+
+    private void waitForPendingRelationLocks(String relationName, int expectedWaiters)
+            throws Exception
+    {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        while (System.nanoTime() < deadlineNanos) {
+            if (getPendingRelationLockCount(relationName) >= expectedWaiters) {
+                return;
+            }
+            Thread.sleep(25);
+        }
+        throw new AssertionError("Timed out waiting for relation lock waiters on " + relationName);
+    }
+
+    private int getPendingRelationLockCount(String relationName)
+            throws Exception
+    {
+        try (Connection connection = openCatalogConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                        "SELECT count(*) " +
+                                "FROM pg_locks l " +
+                                "JOIN pg_class c ON c.oid = l.relation " +
+                                "WHERE c.relname = ? AND l.granted = false")) {
+            statement.setString(1, relationName);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    throw new AssertionError("Missing lock count result");
+                }
+                return resultSet.getInt(1);
+            }
+        }
+    }
+
+    private static boolean containsTransactionConflict(Throwable throwable)
+    {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof TrinoException trinoException
+                    && trinoException.getErrorCode().getCode() == TRANSACTION_CONFLICT.toErrorCode().getCode()) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static DucklakeConfig createIsolatedCatalogConfig()
+            throws Exception
+    {
+        TestingDucklakePostgreSqlCatalogServer server = DucklakeTestCatalogEnvironment.getServer();
+        return new DucklakeConfig()
+                .setMaxCatalogConnections(10)
+                .setCatalogDatabaseUrl(server.getJdbcUrl(ISOLATED_DATABASE_NAME))
+                .setCatalogDatabaseUser(server.getUser())
+                .setCatalogDatabasePassword(server.getPassword());
     }
 
     private static Connection openCatalogConnection()

@@ -21,6 +21,7 @@ import io.trino.plugin.ducklake.DucklakeConfig;
 import io.trino.plugin.ducklake.DucklakeDeleteFragment;
 import io.trino.plugin.ducklake.DucklakeFileColumnStats;
 import io.trino.plugin.ducklake.DucklakeWriteFragment;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.SchemaTableName;
 
 import javax.sql.DataSource;
@@ -41,6 +42,8 @@ import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import static io.trino.spi.StandardErrorCode.TRANSACTION_CONFLICT;
+import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -51,6 +54,7 @@ public class JdbcDucklakeCatalog
         implements DucklakeCatalog
 {
     private static final Logger log = Logger.get(JdbcDucklakeCatalog.class);
+    private static final int CONFLICT_CHANGE_SUMMARY_LIMIT = 10;
 
     private final DataSource dataSource;
     private final HikariDataSource hikariDataSource;
@@ -1033,6 +1037,7 @@ public class JdbcDucklakeCatalog
     {
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
+            long baseSnapshotId = -1;
             try {
                 // 1. Read current snapshot state
                 long currentSnapshotId;
@@ -1047,6 +1052,7 @@ public class JdbcDucklakeCatalog
                             throw new IllegalStateException("No snapshots found");
                         }
                         currentSnapshotId = rs.getLong("snapshot_id");
+                        baseSnapshotId = currentSnapshotId;
                         schemaVersion = rs.getLong("schema_version");
                         nextCatalogId = rs.getLong("next_catalog_id");
                         nextFileId = rs.getLong("next_file_id");
@@ -1058,18 +1064,13 @@ public class JdbcDucklakeCatalog
                         conn, currentSnapshotId, schemaVersion, nextCatalogId, nextFileId);
                 action.execute(tx);
 
-                // 3. Create new snapshot row (with final allocated IDs)
-                try (PreparedStatement stmt = conn.prepareStatement(
-                        "INSERT INTO ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id) " +
-                                "VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?)")) {
-                    stmt.setLong(1, tx.getNewSnapshotId());
-                    stmt.setLong(2, tx.getSchemaVersion());
-                    stmt.setLong(3, tx.getFinalNextCatalogId());
-                    stmt.setLong(4, tx.getFinalNextFileId());
-                    stmt.executeUpdate();
-                }
+                // 3. Strict optimistic conflict check: if snapshot lineage advanced, abort.
+                ensureSnapshotLineageUnchanged(conn, tx.getCurrentSnapshotId(), operationDescription);
 
-                // 4. Insert schema_versions row if schema version changed
+                // 4. Create new snapshot row (with final allocated IDs)
+                insertSnapshotRow(conn, tx, operationDescription);
+
+                // 5. Insert schema_versions row if schema version changed
                 if (tx.getSchemaVersion() != schemaVersion) {
                     try (PreparedStatement stmt = conn.prepareStatement(
                             "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version, table_id) VALUES (?, ?, ?)")) {
@@ -1085,7 +1086,7 @@ public class JdbcDucklakeCatalog
                     }
                 }
 
-                // 5. Insert snapshot changes (comma-separated per spec, one row per snapshot)
+                // 6. Insert snapshot changes (comma-separated per spec, one row per snapshot)
                 if (!tx.getChanges().isEmpty()) {
                     String changesMade = String.join(",", tx.getChanges());
                     try (PreparedStatement stmt = conn.prepareStatement(
@@ -1100,12 +1101,178 @@ public class JdbcDucklakeCatalog
             }
             catch (Exception e) {
                 conn.rollback();
+                if (hasTransactionConflict(e)) {
+                    throw (RuntimeException) e;
+                }
+                if (isMetadataPrimaryKeyConflict(e)) {
+                    long currentSnapshot = readLatestSnapshotId(conn);
+                    throw transactionConflictException(conn, baseSnapshotId, currentSnapshot, operationDescription, e);
+                }
                 throw new RuntimeException("Failed to " + operationDescription, e);
             }
         }
         catch (SQLException e) {
             throw new RuntimeException("Failed to " + operationDescription, e);
         }
+    }
+
+    private void ensureSnapshotLineageUnchanged(Connection conn, long expectedSnapshotId, String operationDescription)
+            throws SQLException
+    {
+        long currentSnapshotId = readLatestSnapshotId(conn);
+        if (currentSnapshotId != expectedSnapshotId) {
+            throw transactionConflictException(conn, expectedSnapshotId, currentSnapshotId, operationDescription, null);
+        }
+    }
+
+    private void insertSnapshotRow(Connection conn, DucklakeWriteTransaction tx, String operationDescription)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "INSERT INTO ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id) " +
+                        "VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?)")) {
+            stmt.setLong(1, tx.getNewSnapshotId());
+            stmt.setLong(2, tx.getSchemaVersion());
+            stmt.setLong(3, tx.getFinalNextCatalogId());
+            stmt.setLong(4, tx.getFinalNextFileId());
+            stmt.executeUpdate();
+        }
+        catch (SQLException e) {
+            if (isDuplicateKeyViolation(e)) {
+                long currentSnapshotId = readLatestSnapshotId(conn);
+                throw transactionConflictException(conn, tx.getCurrentSnapshotId(), currentSnapshotId, operationDescription, e);
+            }
+            throw e;
+        }
+    }
+
+    private TrinoException transactionConflictException(
+            Connection conn,
+            long expectedSnapshotId,
+            long currentSnapshotId,
+            String operationDescription,
+            Throwable cause)
+            throws SQLException
+    {
+        String interveningChanges = getInterveningChangesSummary(conn, expectedSnapshotId, currentSnapshotId);
+        String message = "Concurrent DuckLake commit while attempting to " + operationDescription +
+                ": expected base snapshot " + expectedSnapshotId +
+                ", but current snapshot is " + currentSnapshotId +
+                ". Intervening changes: " + interveningChanges;
+        return new TrinoException(TRANSACTION_CONFLICT, message, cause);
+    }
+
+    private String getInterveningChangesSummary(Connection conn, long fromSnapshotExclusive, long toSnapshotInclusive)
+            throws SQLException
+    {
+        if (toSnapshotInclusive <= fromSnapshotExclusive) {
+            return "none";
+        }
+
+        List<String> changes = new ArrayList<>();
+        String sql = "SELECT snapshot_id, changes_made FROM ducklake_snapshot_changes " +
+                "WHERE snapshot_id > ? AND snapshot_id <= ? " +
+                "ORDER BY snapshot_id";
+        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setLong(1, fromSnapshotExclusive);
+            stmt.setLong(2, toSnapshotInclusive);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    if (changes.size() >= CONFLICT_CHANGE_SUMMARY_LIMIT) {
+                        break;
+                    }
+                    changes.add(rs.getLong("snapshot_id") + ":" + rs.getString("changes_made"));
+                }
+            }
+        }
+
+        if (changes.isEmpty()) {
+            return "snapshot advanced without snapshot_changes rows";
+        }
+        return String.join("; ", changes);
+    }
+
+    private long readLatestSnapshotId(Connection conn)
+            throws SQLException
+    {
+        try (PreparedStatement stmt = conn.prepareStatement(
+                "SELECT snapshot_id FROM ducklake_snapshot " +
+                        "WHERE snapshot_id = (SELECT max(snapshot_id) FROM ducklake_snapshot)");
+                ResultSet rs = stmt.executeQuery()) {
+            if (!rs.next()) {
+                throw new IllegalStateException("No snapshots found");
+            }
+            return rs.getLong("snapshot_id");
+        }
+    }
+
+    private static boolean hasTransactionConflict(Throwable throwable)
+    {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof TrinoException trinoException &&
+                    trinoException.getErrorCode().getCode() == TRANSACTION_CONFLICT.toErrorCode().getCode()) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static boolean isMetadataPrimaryKeyConflict(Throwable throwable)
+    {
+        SQLException sqlException = findSqlException(throwable);
+        if (sqlException == null || !isDuplicateKeyViolation(sqlException)) {
+            return false;
+        }
+
+        String message = sqlException.getMessage();
+        if (message == null) {
+            return false;
+        }
+
+        String lowerMessage = message.toLowerCase(ENGLISH);
+        if (lowerMessage.contains("_pkey")) {
+            return true;
+        }
+
+        return lowerMessage.contains("ducklake_snapshot.snapshot_id")
+                || lowerMessage.contains("ducklake_schema.schema_id")
+                || lowerMessage.contains("ducklake_table.table_id")
+                || lowerMessage.contains("ducklake_view.view_id")
+                || lowerMessage.contains("ducklake_column.column_id")
+                || lowerMessage.contains("ducklake_partition_info.partition_id")
+                || lowerMessage.contains("ducklake_data_file.data_file_id")
+                || lowerMessage.contains("ducklake_delete_file.delete_file_id");
+    }
+
+    private static SQLException findSqlException(Throwable throwable)
+    {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof SQLException sqlException) {
+                return sqlException;
+            }
+            current = current.getCause();
+        }
+        return null;
+    }
+
+    private static boolean isDuplicateKeyViolation(SQLException exception)
+    {
+        String sqlState = exception.getSQLState();
+        if ("23505".equals(sqlState)) {
+            return true;
+        }
+
+        if (exception.getErrorCode() == 19) {
+            return true;
+        }
+
+        String message = exception.getMessage();
+        return message != null && (
+                message.contains("duplicate key value violates unique constraint") ||
+                        message.contains("UNIQUE constraint failed"));
     }
 
     @Override
