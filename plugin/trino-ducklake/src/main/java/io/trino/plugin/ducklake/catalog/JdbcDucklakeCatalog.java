@@ -841,7 +841,7 @@ public class JdbcDucklakeCatalog
         List<List<Object>> rows = new ArrayList<>();
 
         try (Connection conn = dataSource.getConnection()) {
-            OptionalLong sourceSchemaSnapshot = getSnapshotIdForSchemaVersion(conn, schemaVersion, snapshotId);
+            OptionalLong sourceSchemaSnapshot = getSnapshotIdForSchemaVersion(conn, tableId, schemaVersion, snapshotId);
             if (sourceSchemaSnapshot.isEmpty()) {
                 return List.of();
             }
@@ -891,12 +891,34 @@ public class JdbcDucklakeCatalog
         return rows;
     }
 
-    private OptionalLong getSnapshotIdForSchemaVersion(Connection conn, long schemaVersion, long snapshotId)
+    private OptionalLong getSnapshotIdForSchemaVersion(Connection conn, long tableId, long schemaVersion, long snapshotId)
             throws SQLException
     {
-        String sql = "SELECT snapshot_id FROM ducklake_snapshot " +
+        // Prefer table-scoped schema version rows when available.
+        // Some catalogs include ducklake_schema_versions.table_id (DuckDB behavior),
+        // which gives an unambiguous snapshot where this table's schema version was introduced.
+        String tableScopedSql = "SELECT begin_snapshot FROM ducklake_schema_versions " +
+                "WHERE table_id = ? AND schema_version = ? AND begin_snapshot <= ? " +
+                "ORDER BY begin_snapshot DESC LIMIT 1";
+        try (PreparedStatement stmt = conn.prepareStatement(tableScopedSql)) {
+            stmt.setLong(1, tableId);
+            stmt.setLong(2, schemaVersion);
+            stmt.setLong(3, snapshotId);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return OptionalLong.of(rs.getLong("begin_snapshot"));
+                }
+            }
+        }
+        catch (SQLException e) {
+            // Fallback for catalogs without table_id in ducklake_schema_versions or older metadata.
+            log.debug("Could not resolve schema version via ducklake_schema_versions for table %d: %s", tableId, e.getMessage());
+        }
+
+        // Backward-compatible fallback: resolve by snapshot.schema_version only.
+        String fallbackSql = "SELECT snapshot_id FROM ducklake_snapshot " +
                 "WHERE schema_version = ? AND snapshot_id <= ? ORDER BY snapshot_id DESC LIMIT 1";
-        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+        try (PreparedStatement stmt = conn.prepareStatement(fallbackSql)) {
             stmt.setLong(1, schemaVersion);
             stmt.setLong(2, snapshotId);
             try (ResultSet rs = stmt.executeQuery()) {

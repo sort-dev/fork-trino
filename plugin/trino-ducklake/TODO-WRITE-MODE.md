@@ -108,7 +108,7 @@ Still deferred for views:
 - [x] Inlined schema-evolution read alignment: read all live inlined schema-version tables at snapshot, remap by `column_id`, and preserve old inline rows after `ALTER TABLE`.
 - [x] Conservative stats resilience guards ("don't be wrong"): unknown stats for delete-file snapshots, suppress column stats for mixed inline+Parquet, and suppress schema-evolved columns with incomplete coverage.
 - [x] Decision: keep strict stats invalidation (no `% changed > N` heuristic) as default for cross-engine safety.
-- [ ] Schema evolution metadata alignment (`ducklake_schema_versions`).
+- [x] Schema evolution metadata alignment (`ducklake_schema_versions`): schema-changing operations append table-scoped rows; inlined schema resolution prefers table-scoped `begin_snapshot` with fallback.
 - [ ] Concurrency/conflict handling (optimistic commit conflict detection using snapshot lineage and changes).
 - [ ] Performance pass (writer scaling, file size tuning, stats cost).
 

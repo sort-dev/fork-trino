@@ -57,6 +57,8 @@ Stale inlined metadata pointers remain non-fatal. If metadata references an inli
 
 Schema evolution with inlined data now follows DuckDB behavior: Trino reads across multiple active `ducklake_inlined_data_<table_id>_<schema_version>` tables at a snapshot, instead of selecting a single schema-version table. For evolved schemas, projected columns are mapped by `column_id` and missing fields from older inline tables are returned as `NULL`.
 
+Schema metadata alignment for inlined reads now prefers table-scoped `ducklake_schema_versions` (`table_id`, `schema_version`, `begin_snapshot`) to resolve the source schema snapshot, with backward-compatible fallback to `ducklake_snapshot.schema_version`.
+
 ### Statistics resilience
 Stats policy is now intentionally conservative ("don't be wrong"):
 
