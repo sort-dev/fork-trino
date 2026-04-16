@@ -22,6 +22,8 @@ import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitManager;
 import io.trino.plugin.base.classloader.ForClassLoaderSafe;
 import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
+import io.trino.plugin.ducklake.catalog.DucklakeDeleteFragment;
+import io.trino.plugin.ducklake.catalog.DucklakeWriteFragment;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
 import io.trino.spi.connector.ConnectorPageSinkProvider;

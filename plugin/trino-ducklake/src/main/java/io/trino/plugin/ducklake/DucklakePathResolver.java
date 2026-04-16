@@ -14,7 +14,6 @@
 package io.trino.plugin.ducklake;
 
 import com.google.inject.Inject;
-import io.trino.filesystem.Location;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeSchema;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
@@ -26,19 +25,24 @@ import static java.util.Objects.requireNonNull;
 public class DucklakePathResolver
 {
     private final DucklakeCatalog catalog;
-    private final DucklakeConfig config;
+    private final String configuredDataPath;
 
     @Inject
     public DucklakePathResolver(DucklakeCatalog catalog, DucklakeConfig config)
     {
+        this(catalog, requireNonNull(config, "config is null").getDataPath());
+    }
+
+    public DucklakePathResolver(DucklakeCatalog catalog, String configuredDataPath)
+    {
         this.catalog = requireNonNull(catalog, "catalog is null");
-        this.config = requireNonNull(config, "config is null");
+        this.configuredDataPath = configuredDataPath;
     }
 
     public String resolveTableDataPath(DucklakeSchema schema, DucklakeTable table)
     {
         Optional<String> catalogDataPath = catalog.getDataPath();
-        String rootDataPath = catalogDataPath.orElseGet(config::getDataPath);
+        String rootDataPath = catalogDataPath.orElse(configuredDataPath);
 
         if (rootDataPath == null) {
             throw new IllegalStateException("No data path configured for relative file paths");
@@ -53,7 +57,7 @@ public class DucklakePathResolver
         if (!isRelative) {
             return path;
         }
-        return Location.of(tableDataPath).appendPath(path).toString();
+        return joinPaths(tableDataPath, path);
     }
 
     String resolveScopedPath(Optional<String> path, Optional<Boolean> isRelative, String parentPath)
@@ -63,8 +67,16 @@ public class DucklakePathResolver
         }
 
         if (isRelative.orElse(false)) {
-            return Location.of(parentPath).appendPath(path.get()).toString();
+            return joinPaths(parentPath, path.get());
         }
         return path.get();
+    }
+
+    private static String joinPaths(String parent, String child)
+    {
+        if (parent.endsWith("/")) {
+            return parent + child;
+        }
+        return parent + "/" + child;
     }
 }

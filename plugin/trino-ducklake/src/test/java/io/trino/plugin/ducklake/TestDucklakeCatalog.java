@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.ducklake;
 
+import io.trino.plugin.ducklake.catalog.ColumnRangePredicate;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeColumnStats;
@@ -54,7 +55,7 @@ public class TestDucklakeCatalog
     public void setUp()
             throws Exception
     {
-        catalog = new JdbcDucklakeCatalog(DucklakeTestCatalogEnvironment.createDucklakeConfig());
+        catalog = new JdbcDucklakeCatalog(DucklakeTestCatalogEnvironment.createDucklakeConfig().toCatalogConfig());
     }
 
     @AfterEach
@@ -263,14 +264,14 @@ public class TestDucklakeCatalog
         long priceColumnId = getColumnId(columns, "price");
         long createdDateColumnId = getColumnId(columns, "created_date");
 
-        assertThat(catalog.getDataFileIdsForPredicate(table.tableId(), priceColumnId, snapshotId, 30.0, 30.0))
+        assertThat(catalog.findDataFileIdsInRange(table.tableId(), snapshotId, new ColumnRangePredicate(priceColumnId, "30.0", "30.0")))
                 .isNotEmpty();
-        assertThat(catalog.getDataFileIdsForPredicate(table.tableId(), priceColumnId, snapshotId, 1000.0, 1000.0))
+        assertThat(catalog.findDataFileIdsInRange(table.tableId(), snapshotId, new ColumnRangePredicate(priceColumnId, "1000.0", "1000.0")))
                 .isEmpty();
 
-        assertThat(catalog.getDataFileIdsForPredicate(table.tableId(), createdDateColumnId, snapshotId, "2024-02-01", "2024-02-01"))
+        assertThat(catalog.findDataFileIdsInRange(table.tableId(), snapshotId, new ColumnRangePredicate(createdDateColumnId, "2024-02-01", "2024-02-01")))
                 .isNotEmpty();
-        assertThat(catalog.getDataFileIdsForPredicate(table.tableId(), createdDateColumnId, snapshotId, "2025-01-01", "2025-01-01"))
+        assertThat(catalog.findDataFileIdsInRange(table.tableId(), snapshotId, new ColumnRangePredicate(createdDateColumnId, "2025-01-01", "2025-01-01")))
                 .isEmpty();
     }
 
@@ -281,11 +282,7 @@ public class TestDucklakeCatalog
         DucklakeTable table = getTable("test_schema", "simple_table", snapshotId);
         List<DucklakeColumn> columns = catalog.getTableColumns(table.tableId(), snapshotId);
 
-        // Build column type map
-        Map<Long, String> columnTypes = columns.stream()
-                .collect(java.util.stream.Collectors.toMap(DucklakeColumn::columnId, DucklakeColumn::columnType));
-
-        List<DucklakeColumnStats> statsList = catalog.getColumnStats(table.tableId(), snapshotId, columnTypes);
+        List<DucklakeColumnStats> statsList = catalog.getColumnStats(table.tableId(), snapshotId);
         assertThat(statsList).isNotEmpty();
 
         // Verify price column (DOUBLE) has typed min/max
@@ -567,7 +564,7 @@ public class TestDucklakeCatalog
             if (catalog.getSnapshot(snapshotId).isEmpty()) {
                 continue;
             }
-            if (catalog.getTable(new SchemaTableName("test_schema", "schema_evolution_table"), snapshotId).isEmpty()) {
+            if (catalog.getTable("test_schema", "schema_evolution_table", snapshotId).isEmpty()) {
                 continue;
             }
             long recordCount = catalog.getDataFiles(schemaEvolutionTable.tableId(), snapshotId).stream()

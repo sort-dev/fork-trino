@@ -13,22 +13,19 @@
  */
 package io.trino.plugin.ducklake.catalog;
 
-import java.util.Optional;
-import java.util.OptionalLong;
-
 /**
- * Represents a view stored in the ducklake_view catalog table.
- * Views are snapshot-scoped: visible from beginSnapshot until endSnapshot.
+ * Base exception for Ducklake catalog operations.
  */
-public record DucklakeView(
-        long viewId,
-        String viewUuid,
-        long schemaId,
-        String viewName,
-        String sql,
-        String dialect,
-        Optional<String> viewMetadata,
-        long beginSnapshot,
-        OptionalLong endSnapshot)
+public class DucklakeException
+        extends RuntimeException
 {
+    public DucklakeException(String message)
+    {
+        super(message);
+    }
+
+    public DucklakeException(String message, Throwable cause)
+    {
+        super(message, cause);
+    }
 }

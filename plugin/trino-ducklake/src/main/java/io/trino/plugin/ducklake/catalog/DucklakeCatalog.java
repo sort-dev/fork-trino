@@ -13,10 +13,6 @@
  */
 package io.trino.plugin.ducklake.catalog;
 
-import io.trino.plugin.ducklake.DucklakeDeleteFragment;
-import io.trino.plugin.ducklake.DucklakeWriteFragment;
-import io.trino.spi.connector.SchemaTableName;
-
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -71,7 +67,7 @@ public interface DucklakeCatalog
     /**
      * Get a specific table by name at the given snapshot
      */
-    Optional<DucklakeTable> getTable(SchemaTableName tableName, long snapshotId);
+    Optional<DucklakeTable> getTable(String schemaName, String tableName, long snapshotId);
 
     /**
      * Get table by ID at the given snapshot
@@ -87,7 +83,7 @@ public interface DucklakeCatalog
      * Get all columns (including nested) for a table at the given snapshot as a flat list.
      * Each column retains its {@code parentColumn} reference. Used for Parquet field_id mapping.
      */
-    List<DucklakeColumn> getAllColumnsFlat(long tableId, long snapshotId);
+    List<DucklakeColumn> getAllColumnsWithParentage(long tableId, long snapshotId);
 
     /**
      * Get data files for a table at the given snapshot
@@ -95,9 +91,10 @@ public interface DucklakeCatalog
     List<DucklakeDataFile> getDataFiles(long tableId, long snapshotId);
 
     /**
-     * Get file-level column statistics for predicate pushdown
+     * Find data file IDs whose column statistics overlap with the given range.
+     * Used for predicate pushdown — files outside the range are pruned.
      */
-    List<Long> getDataFileIdsForPredicate(long tableId, long columnId, long snapshotId, Object minValue, Object maxValue);
+    List<Long> findDataFileIdsInRange(long tableId, long snapshotId, ColumnRangePredicate predicate);
 
     /**
      * Get table-level statistics (record count, file size) from ducklake_table_stats
@@ -106,9 +103,10 @@ public interface DucklakeCatalog
 
     /**
      * Get aggregated column statistics across all active data files.
-     * Column types are used for typed min/max comparison (not lexicographic).
+     * Min/max values are compared using typed comparison (numeric, not lexicographic)
+     * based on column types resolved internally.
      */
-    List<DucklakeColumnStats> getColumnStats(long tableId, long snapshotId, Map<Long, String> columnTypes);
+    List<DucklakeColumnStats> getColumnStats(long tableId, long snapshotId);
 
     /**
      * Get partition specs for a table at the given snapshot
@@ -177,39 +175,39 @@ public interface DucklakeCatalog
      * Add a column to a table. Creates a new ducklake_column row with a new column_id.
      * Increments schema version. Creates a new snapshot atomically.
      */
-    void addColumn(long tableId, String schemaName, String tableName, TableColumnSpec column);
+    void addColumn(long tableId, TableColumnSpec column);
 
     /**
      * Drop a column from a table. Sets end_snapshot on the column's current row.
      * Increments schema version. Creates a new snapshot atomically.
      */
-    void dropColumn(long tableId, String schemaName, String tableName, long columnId);
+    void dropColumn(long tableId, long columnId);
 
     /**
      * Rename a column. End-snapshots the current column row and inserts a new row
      * with the same column_id but updated column_name.
      * Increments schema version. Creates a new snapshot atomically.
      */
-    void renameColumn(long tableId, String schemaName, String tableName, long columnId, String newName);
+    void renameColumn(long tableId, long columnId, String newName);
 
     /**
      * Commit inserted data files to a table.
      * Creates a new snapshot with data file rows, file column stats,
      * and updated table stats.
      */
-    void commitInsert(long tableId, String schemaName, String tableName, List<DucklakeWriteFragment> fragments);
+    void commitInsert(long tableId, List<DucklakeWriteFragment> fragments);
 
     /**
      * Commit delete files for a table.
      * Creates a new snapshot with ducklake_delete_file rows and updated table stats.
      */
-    void commitDelete(long tableId, String schemaName, String tableName, List<DucklakeDeleteFragment> deleteFragments);
+    void commitDelete(long tableId, List<DucklakeDeleteFragment> deleteFragments);
 
     /**
      * Atomically commit both delete files and inserted data files in a single snapshot.
      * Used for UPDATE (delete old rows + insert new rows) and MERGE operations.
      */
-    void commitMerge(long tableId, String schemaName, String tableName,
+    void commitMerge(long tableId,
             List<DucklakeDeleteFragment> deleteFragments, List<DucklakeWriteFragment> insertFragments);
 
     // ==================== View operations ====================
@@ -228,7 +226,7 @@ public interface DucklakeCatalog
      * Create a new view in the catalog.
      * Creates a new snapshot and inserts the view row atomically.
      */
-    void createView(String schemaName, String viewName, String sql, String dialect, String columnAliases);
+    void createView(String schemaName, String viewName, String sql, String dialect, String viewMetadata);
 
     /**
      * Rename an existing view, optionally moving it across schemas.
@@ -240,7 +238,7 @@ public interface DucklakeCatalog
      * Replace active view metadata while preserving view identity.
      * Used for view comment and column-comment updates.
      */
-    void replaceViewMetadata(String schemaName, String viewName, String sql, String dialect, String columnAliases);
+    void replaceViewMetadata(String schemaName, String viewName, String sql, String dialect, String viewMetadata);
 
     /**
      * Drop an existing view from the catalog.

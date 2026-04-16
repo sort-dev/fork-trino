@@ -17,8 +17,10 @@ import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.airlift.log.Logger;
 import io.airlift.slice.Slices;
+import io.trino.plugin.ducklake.catalog.ColumnRangePredicate;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
+import io.trino.plugin.ducklake.catalog.DucklakeInlinedDataInfo;
 import io.trino.plugin.ducklake.catalog.DucklakeFilePartitionValue;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionField;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionSpec;
@@ -113,7 +115,9 @@ public class DucklakeSplitManager
 
         log.debug("Found %d data files for table %s", dataFiles.size(), tableHandle.tableName());
 
-        List<DucklakeInlinedSplit> inlinedSplits = catalog.getInlinedDataInfos(tableHandle.tableId(), tableHandle.snapshotId()).stream()
+        boolean tableHasNoDataFiles = dataFiles.isEmpty();
+        List<DucklakeInlinedDataInfo> inlinedDataInfos = catalog.getInlinedDataInfos(tableHandle.tableId(), tableHandle.snapshotId());
+        List<DucklakeInlinedSplit> inlinedSplits = inlinedDataInfos.stream()
                 .filter(info -> catalog.hasInlinedRows(info.tableId(), info.schemaVersion(), tableHandle.snapshotId()))
                 .map(info -> {
                     log.debug("Found inlined data for table %s (tableId=%d, schemaVersion=%d)",
@@ -144,6 +148,16 @@ public class DucklakeSplitManager
             parquetSplits = groupedFiles.values().stream()
                     .map(group -> createMergedSplit(group, tableDataPath, fileStatisticsDomain))
                     .collect(toImmutableList());
+        }
+
+        // Empty table (no data files at all) with an inlined data table: emit an inlined
+        // split so the engine gets a proper empty result instead of zero splits.
+        // This does NOT apply when pruning eliminated all files — that means no rows match.
+        if (tableHasNoDataFiles && inlinedSplits.isEmpty() && !inlinedDataInfos.isEmpty()) {
+            DucklakeInlinedDataInfo latestInfo = inlinedDataInfos.getLast();
+            log.debug("Emitting empty inlined split for table %s (tableId=%d, schemaVersion=%d)",
+                    tableHandle.tableName(), latestInfo.tableId(), latestInfo.schemaVersion());
+            inlinedSplits = List.of(new DucklakeInlinedSplit(latestInfo.tableId(), latestInfo.schemaVersion(), tableHandle.snapshotId()));
         }
 
         if (parquetSplits.isEmpty() && inlinedSplits.isEmpty()) {
@@ -204,12 +218,10 @@ public class DucklakeSplitManager
             }
 
             PredicateBounds bounds = predicateBounds.get();
-            List<Long> matchingFileIds = catalog.getDataFileIdsForPredicate(
+            List<Long> matchingFileIds = catalog.findDataFileIdsInRange(
                     tableHandle.tableId(),
-                    columnHandle.columnId(),
                     tableHandle.snapshotId(),
-                    bounds.minValue(),
-                    bounds.maxValue());
+                    new ColumnRangePredicate(columnHandle.columnId(), bounds.minValue(), bounds.maxValue()));
 
             pruningApplied = true;
             candidateFileIds.retainAll(matchingFileIds);
@@ -278,10 +290,10 @@ public class DucklakeSplitManager
                     }
 
                     Range span = ranges.getSpan();
-                    Object minValue = span.getLowValue()
+                    String minValue = span.getLowValue()
                             .map(value -> normalizePredicateValue(domain.getType(), value))
                             .orElse(null);
-                    Object maxValue = span.getHighValue()
+                    String maxValue = span.getHighValue()
                             .map(value -> normalizePredicateValue(domain.getType(), value))
                             .orElse(null);
 
@@ -300,27 +312,21 @@ public class DucklakeSplitManager
             return Optional.empty();
         }
 
-        Object minValue = null;
-        Object maxValue = null;
+        String minValue = null;
+        String maxValue = null;
         for (Object value : discreteValues.getValues()) {
-            Object normalized = normalizePredicateValue(type, value);
-            if (minValue == null || compareNormalized(normalized, minValue) < 0) {
+            String normalized = normalizePredicateValue(type, value);
+            if (minValue == null || normalized.compareTo(minValue) < 0) {
                 minValue = normalized;
             }
-            if (maxValue == null || compareNormalized(normalized, maxValue) > 0) {
+            if (maxValue == null || normalized.compareTo(maxValue) > 0) {
                 maxValue = normalized;
             }
         }
         return Optional.of(new PredicateBounds(minValue, maxValue));
     }
 
-    @SuppressWarnings("unchecked")
-    private static int compareNormalized(Object left, Object right)
-    {
-        return ((Comparable<Object>) left).compareTo(right);
-    }
-
-    private Object normalizePredicateValue(Type type, Object value)
+    private String normalizePredicateValue(Type type, Object value)
     {
         if (value instanceof io.airlift.slice.Slice slice) {
             return slice.toStringUtf8();
@@ -328,7 +334,7 @@ public class DucklakeSplitManager
         if (type.equals(DATE) && value instanceof Long daysSinceEpoch) {
             return LocalDate.ofEpochDay(daysSinceEpoch).toString();
         }
-        return value;
+        return value.toString();
     }
 
     private List<DucklakeDataFile> pruneByPartitionValues(
@@ -494,5 +500,5 @@ public class DucklakeSplitManager
                 fileStatisticsDomain);
     }
 
-    private record PredicateBounds(Object minValue, Object maxValue) {}
+    private record PredicateBounds(String minValue, String maxValue) {}
 }

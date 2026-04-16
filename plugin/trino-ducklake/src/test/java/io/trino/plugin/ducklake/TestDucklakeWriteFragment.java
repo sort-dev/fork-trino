@@ -15,6 +15,8 @@ package io.trino.plugin.ducklake;
 
 import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
+import io.trino.plugin.ducklake.catalog.DucklakeFileColumnStats;
+import io.trino.plugin.ducklake.catalog.DucklakeWriteFragment;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

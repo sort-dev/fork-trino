@@ -66,7 +66,7 @@ public class TestDucklakePartitionPruning
             throws Exception
     {
         config = DucklakeTestCatalogEnvironment.createDucklakeConfig();
-        catalog = new JdbcDucklakeCatalog(config);
+        catalog = new JdbcDucklakeCatalog(config.toCatalogConfig());
         snapshotId = catalog.getCurrentSnapshotId();
 
         DucklakeSchema schema = catalog.listSchemas(snapshotId).stream()

@@ -35,6 +35,6 @@ public class DucklakeCatalogProvider
     public DucklakeCatalog get()
     {
         requireNonNull(config.getCatalogDatabaseUrl(), "ducklake.catalog.database-url is null");
-        return new JdbcDucklakeCatalog(config);
+        return new JdbcDucklakeCatalog(config.toCatalogConfig());
     }
 }

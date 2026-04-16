@@ -15,7 +15,8 @@ package io.trino.plugin.ducklake;
 
 import io.trino.Session;
 import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
-import io.trino.spi.TrinoException;
+import io.trino.plugin.ducklake.catalog.TransactionConflictException;
+
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
@@ -36,7 +37,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static io.trino.plugin.ducklake.DucklakeSessionProperties.READ_SNAPSHOT_ID;
-import static io.trino.spi.StandardErrorCode.TRANSACTION_CONFLICT;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -298,7 +299,7 @@ public class TestDucklakeDDLIntegration
         String schemaOne = "conflict_schema_a_" + snapshotBefore;
         String schemaTwo = "conflict_schema_b_" + snapshotBefore;
 
-        JdbcDucklakeCatalog catalog = new JdbcDucklakeCatalog(createIsolatedCatalogConfig());
+        JdbcDucklakeCatalog catalog = new JdbcDucklakeCatalog(createIsolatedCatalogConfig().toCatalogConfig());
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try (Connection lockConnection = openCatalogConnection()) {
             lockConnection.setAutoCommit(false);
@@ -833,8 +834,7 @@ public class TestDucklakeDDLIntegration
     {
         Throwable current = throwable;
         while (current != null) {
-            if (current instanceof TrinoException trinoException
-                    && trinoException.getErrorCode().getCode() == TRANSACTION_CONFLICT.toErrorCode().getCode()) {
+            if (current instanceof TransactionConflictException) {
                 return true;
             }
             current = current.getCause();

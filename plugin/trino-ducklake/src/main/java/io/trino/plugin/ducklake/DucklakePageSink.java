@@ -23,6 +23,8 @@ import io.trino.filesystem.TrinoOutputFile;
 import io.trino.parquet.writer.ParquetSchemaConverter;
 import io.trino.parquet.writer.ParquetWriter;
 import io.trino.parquet.writer.ParquetWriterOptions;
+import io.trino.plugin.ducklake.catalog.DucklakeFileColumnStats;
+import io.trino.plugin.ducklake.catalog.DucklakeWriteFragment;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
 import io.trino.spi.Page;
 import io.trino.spi.PageIndexerFactory;

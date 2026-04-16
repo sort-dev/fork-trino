@@ -13,17 +13,8 @@
  */
 package io.trino.plugin.ducklake.catalog;
 
-import com.google.inject.Inject;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
-import io.airlift.log.Logger;
-import io.trino.plugin.ducklake.DucklakeConfig;
-import io.trino.plugin.ducklake.DucklakeDeleteFragment;
-import io.trino.plugin.ducklake.DucklakeFileColumnStats;
-import io.trino.plugin.ducklake.DucklakeWriteFragment;
-import io.trino.spi.TrinoException;
-import io.trino.spi.connector.SchemaTableName;
-
 import javax.sql.DataSource;
 
 import java.sql.Connection;
@@ -44,7 +35,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
-import static io.trino.spi.StandardErrorCode.TRANSACTION_CONFLICT;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 
@@ -55,15 +45,14 @@ import static java.util.Objects.requireNonNull;
 public class JdbcDucklakeCatalog
         implements DucklakeCatalog
 {
-    private static final Logger log = Logger.get(JdbcDucklakeCatalog.class);
+    private static final System.Logger log = System.getLogger(JdbcDucklakeCatalog.class.getName());
     private static final int CONFLICT_CHANGE_SUMMARY_LIMIT = 10;
 
     private final DataSource dataSource;
     private final HikariDataSource hikariDataSource;
     private final boolean isPostgresql;
 
-    @Inject
-    public JdbcDucklakeCatalog(DucklakeConfig config)
+    public JdbcDucklakeCatalog(DucklakeCatalogConfig config)
     {
         requireNonNull(config, "config is null");
 
@@ -84,7 +73,7 @@ public class JdbcDucklakeCatalog
         this.hikariDataSource = new HikariDataSource(hikariConfig);
         this.dataSource = hikariDataSource;
 
-        log.info("Initialized Ducklake JDBC catalog: %s", config.getCatalogDatabaseUrl());
+        log.log(System.Logger.Level.INFO, "Initialized Ducklake JDBC catalog: {0}", config.getCatalogDatabaseUrl());
     }
 
     @Override
@@ -301,10 +290,10 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public Optional<DucklakeTable> getTable(SchemaTableName tableName, long snapshotId)
+    public Optional<DucklakeTable> getTable(String schemaName, String tableName, long snapshotId)
     {
         // First get the schema
-        Optional<DucklakeSchema> schema = getSchema(tableName.getSchemaName(), snapshotId);
+        Optional<DucklakeSchema> schema = getSchema(schemaName, snapshotId);
         if (schema.isEmpty()) {
             return Optional.empty();
         }
@@ -316,7 +305,7 @@ public class JdbcDucklakeCatalog
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setLong(1, schema.get().schemaId());
-            stmt.setString(2, tableName.getTableName());
+            stmt.setString(2, tableName);
             stmt.setLong(3, snapshotId);
             stmt.setLong(4, snapshotId);
 
@@ -434,7 +423,7 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public List<DucklakeColumn> getAllColumnsFlat(long tableId, long snapshotId)
+    public List<DucklakeColumn> getAllColumnsWithParentage(long tableId, long snapshotId)
     {
         String sql = "SELECT column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, nulls_allowed, parent_column " +
                      "FROM ducklake_column " +
@@ -523,8 +512,12 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public List<Long> getDataFileIdsForPredicate(long tableId, long columnId, long snapshotId, Object minValue, Object maxValue)
+    public List<Long> findDataFileIdsInRange(long tableId, long snapshotId, ColumnRangePredicate predicate)
     {
+        long columnId = predicate.columnId();
+        String minValue = predicate.minValue();
+        String maxValue = predicate.maxValue();
+
         Optional<String> columnType = getColumnType(tableId, columnId, snapshotId);
         if (columnType.isEmpty()) {
             return List.of();
@@ -547,8 +540,8 @@ public class JdbcDucklakeCatalog
             stmt.setLong(4, snapshotId);
             stmt.setLong(5, snapshotId);
 
-            Comparable<?> lowerBound = normalizePredicateValue(columnType.get(), minValue);
-            Comparable<?> upperBound = normalizePredicateValue(columnType.get(), maxValue);
+            Comparable<?> lowerBound = parseStatValue(columnType.get(), minValue);
+            Comparable<?> upperBound = parseStatValue(columnType.get(), maxValue);
 
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
@@ -593,8 +586,12 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public List<DucklakeColumnStats> getColumnStats(long tableId, long snapshotId, Map<Long, String> columnTypes)
+    public List<DucklakeColumnStats> getColumnStats(long tableId, long snapshotId)
     {
+        // Resolve column types internally for typed min/max comparison
+        Map<Long, String> columnTypes = getTableColumns(tableId, snapshotId).stream()
+                .collect(Collectors.toMap(DucklakeColumn::columnId, DucklakeColumn::columnType));
+
         // Fetch per-file stats and aggregate in Java with typed min/max comparison
         String sql = "SELECT stats.column_id, stats.value_count, stats.null_count, " +
                      "       stats.column_size_bytes, stats.min_value, stats.max_value " +
@@ -794,7 +791,7 @@ public class JdbcDucklakeCatalog
                     catch (SQLException e) {
                         // Catalog metadata can point to a dropped/non-materialized inlined table.
                         // Treat this as "no inlined data" so scan planning does not emit a dead split.
-                        log.debug("Inlined data table %s not available for table %d: %s", inlinedTableName, tableId, e.getMessage());
+                        log.log(System.Logger.Level.DEBUG, "Inlined data table {0} not available for table {1}: {2}", inlinedTableName, tableId, e.getMessage());
                         continue;
                     }
 
@@ -808,7 +805,7 @@ public class JdbcDucklakeCatalog
         }
         catch (SQLException e) {
             // ducklake_inlined_data_tables may not exist in catalogs that never used inlining
-            log.debug("Could not query inlined data tables (table may not exist): %s", e.getMessage());
+            log.log(System.Logger.Level.DEBUG, "Could not query inlined data tables (table may not exist): {0}", e.getMessage());
             return List.of();
         }
     }
@@ -830,7 +827,7 @@ public class JdbcDucklakeCatalog
             }
         }
         catch (SQLException e) {
-            log.debug("Could not probe inlined data rows from %s (table may not exist): %s", inlinedTableName, e.getMessage());
+            log.log(System.Logger.Level.DEBUG, "Could not probe inlined data rows from {0} (table may not exist): {1}", inlinedTableName, e.getMessage());
             return false;
         }
     }
@@ -890,7 +887,7 @@ public class JdbcDucklakeCatalog
         catch (SQLException e) {
             // The inlined data table may not exist if the table was created but never had data inserted,
             // or if the inlined data was flushed to Parquet files. Return empty in these cases.
-            log.debug("Could not read inlined data from %s (table may not exist): %s", inlinedTableName, e.getMessage());
+            log.log(System.Logger.Level.DEBUG, "Could not read inlined data from {0} (table may not exist): {1}", inlinedTableName, e.getMessage());
             return List.of();
         }
 
@@ -918,7 +915,7 @@ public class JdbcDucklakeCatalog
         }
         catch (SQLException e) {
             // Fallback for catalogs without table_id in ducklake_schema_versions or older metadata.
-            log.debug("Could not resolve schema version via ducklake_schema_versions for table %d: %s", tableId, e.getMessage());
+            log.log(System.Logger.Level.DEBUG, "Could not resolve schema version via ducklake_schema_versions for table {0}: {1}", tableId, e.getMessage());
         }
 
         // Backward-compatible fallback: resolve by snapshot.schema_version only.
@@ -1148,7 +1145,7 @@ public class JdbcDucklakeCatalog
         }
     }
 
-    private TrinoException transactionConflictException(
+    private TransactionConflictException transactionConflictException(
             Connection conn,
             long expectedSnapshotId,
             long currentSnapshotId,
@@ -1161,7 +1158,7 @@ public class JdbcDucklakeCatalog
                 ": expected base snapshot " + expectedSnapshotId +
                 ", but current snapshot is " + currentSnapshotId +
                 ". Intervening changes: " + interveningChanges;
-        return new TrinoException(TRANSACTION_CONFLICT, message, cause);
+        return new TransactionConflictException(message, cause);
     }
 
     private String getInterveningChangesSummary(Connection conn, long fromSnapshotExclusive, long toSnapshotInclusive)
@@ -1212,8 +1209,7 @@ public class JdbcDucklakeCatalog
     {
         Throwable current = throwable;
         while (current != null) {
-            if (current instanceof TrinoException trinoException &&
-                    trinoException.getErrorCode().getCode() == TRANSACTION_CONFLICT.toErrorCode().getCode()) {
+            if (current instanceof TransactionConflictException) {
                 return true;
             }
             current = current.getCause();
@@ -1278,14 +1274,14 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public void createView(String schemaName, String viewName, String viewSql, String dialect, String columnAliases)
+    public void createView(String schemaName, String viewName, String viewSql, String dialect, String viewMetadata)
     {
         executeWriteTransaction("create view " + schemaName + "." + viewName, tx -> {
             long schemaId = tx.resolveSchemaId(schemaName);
             long viewId = tx.allocateCatalogId();
             tx.addChange("created_view:" + viewName);
 
-            insertViewRow(tx, viewId, UUID.randomUUID().toString(), schemaId, viewName, dialect, viewSql, columnAliases);
+            insertViewRow(tx, viewId, UUID.randomUUID().toString(), schemaId, viewName, dialect, viewSql, viewMetadata);
         });
     }
 
@@ -1327,20 +1323,20 @@ public class JdbcDucklakeCatalog
                             targetViewName,
                             sourceView.dialect(),
                             sourceView.sql(),
-                            sourceView.columnAliases().orElse(null));
+                            sourceView.viewMetadata().orElse(null));
                     tx.addChange("renamed_view:" + sourceView.viewId());
                 });
     }
 
     @Override
-    public void replaceViewMetadata(String schemaName, String viewName, String viewSql, String dialect, String columnAliases)
+    public void replaceViewMetadata(String schemaName, String viewName, String viewSql, String dialect, String viewMetadata)
     {
         executeWriteTransaction("alter view " + schemaName + "." + viewName, tx -> {
             long schemaId = tx.resolveSchemaId(schemaName);
             ActiveViewRow view = resolveActiveViewRow(tx, schemaId, viewName);
 
             endSnapshotActiveView(tx, view.viewId());
-            insertViewRow(tx, view.viewId(), view.viewUuid(), schemaId, viewName, dialect, viewSql, columnAliases);
+            insertViewRow(tx, view.viewId(), view.viewUuid(), schemaId, viewName, dialect, viewSql, viewMetadata);
             tx.addChange("altered_view:" + view.viewId());
         });
     }
@@ -1381,7 +1377,7 @@ public class JdbcDucklakeCatalog
             String viewName,
             String dialect,
             String viewSql,
-            String columnAliases)
+            String viewMetadata)
             throws SQLException
     {
         try (PreparedStatement stmt = tx.getConnection().prepareStatement(
@@ -1394,7 +1390,7 @@ public class JdbcDucklakeCatalog
             stmt.setString(5, viewName);
             stmt.setString(6, dialect);
             stmt.setString(7, viewSql);
-            setNullableString(stmt, 8, columnAliases);
+            setNullableString(stmt, 8, viewMetadata);
             stmt.executeUpdate();
         }
     }
@@ -1452,7 +1448,7 @@ public class JdbcDucklakeCatalog
             String viewName,
             String dialect,
             String sql,
-            Optional<String> columnAliases) {}
+            Optional<String> viewMetadata) {}
 
     // ==================== Schema DDL ====================
 
@@ -1666,9 +1662,9 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public void addColumn(long tableId, String schemaName, String tableName, TableColumnSpec column)
+    public void addColumn(long tableId, TableColumnSpec column)
     {
-        executeWriteTransaction("add column to " + schemaName + "." + tableName, tx -> {
+        executeWriteTransaction("add column to table " + tableId, tx -> {
             // Find the current max column_order for top-level columns
             long maxOrder = 0;
             try (PreparedStatement stmt = tx.getConnection().prepareStatement(
@@ -1692,9 +1688,9 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public void dropColumn(long tableId, String schemaName, String tableName, long columnId)
+    public void dropColumn(long tableId, long columnId)
     {
-        executeWriteTransaction("drop column from " + schemaName + "." + tableName, tx -> {
+        executeWriteTransaction("drop column from table " + tableId, tx -> {
             // End-snapshot the column and all its children (for nested types)
             try (PreparedStatement stmt = tx.getConnection().prepareStatement(
                     "UPDATE ducklake_column SET end_snapshot = ? " +
@@ -1712,9 +1708,9 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public void renameColumn(long tableId, String schemaName, String tableName, long columnId, String newName)
+    public void renameColumn(long tableId, long columnId, String newName)
     {
-        executeWriteTransaction("rename column in " + schemaName + "." + tableName, tx -> {
+        executeWriteTransaction("rename column in table " + tableId, tx -> {
             // Read the current column metadata
             long columnOrder;
             String columnType;
@@ -1769,13 +1765,13 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public void commitInsert(long tableId, String schemaName, String tableName, List<DucklakeWriteFragment> fragments)
+    public void commitInsert(long tableId, List<DucklakeWriteFragment> fragments)
     {
         if (fragments.isEmpty()) {
             return;
         }
 
-        executeWriteTransaction("insert into " + schemaName + "." + tableName, tx -> {
+        executeWriteTransaction("insert into table " + tableId, tx -> {
             applyInsertFragments(tx, tableId, fragments);
             tx.addChange("inserted_into_table:" + tableId);
         });
@@ -2001,27 +1997,27 @@ public class JdbcDucklakeCatalog
     }
 
     @Override
-    public void commitDelete(long tableId, String schemaName, String tableName, List<DucklakeDeleteFragment> deleteFragments)
+    public void commitDelete(long tableId, List<DucklakeDeleteFragment> deleteFragments)
     {
         if (deleteFragments.isEmpty()) {
             return;
         }
 
-        executeWriteTransaction("delete from " + schemaName + "." + tableName, tx -> {
+        executeWriteTransaction("delete from table " + tableId, tx -> {
             applyDeleteFragments(tx, tableId, deleteFragments);
             tx.addChange("deleted_from_table:" + tableId);
         });
     }
 
     @Override
-    public void commitMerge(long tableId, String schemaName, String tableName,
+    public void commitMerge(long tableId,
             List<DucklakeDeleteFragment> deleteFragments, List<DucklakeWriteFragment> insertFragments)
     {
         if (deleteFragments.isEmpty() && insertFragments.isEmpty()) {
             return;
         }
 
-        executeWriteTransaction("merge into " + schemaName + "." + tableName, tx -> {
+        executeWriteTransaction("merge into table " + tableId, tx -> {
             if (!deleteFragments.isEmpty()) {
                 applyDeleteFragments(tx, tableId, deleteFragments);
                 tx.addChange("deleted_from_table:" + tableId);
@@ -2260,14 +2256,6 @@ public class JdbcDucklakeCatalog
         catch (SQLException e) {
             throw new RuntimeException("Failed to get column type for table: " + tableId + ", column: " + columnId, e);
         }
-    }
-
-    private Comparable<?> normalizePredicateValue(String columnType, Object value)
-    {
-        if (value == null) {
-            return null;
-        }
-        return parseStatValue(columnType, value.toString());
     }
 
     private Comparable<?> parseStatValue(String columnType, String value)

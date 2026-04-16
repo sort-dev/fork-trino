@@ -43,7 +43,7 @@ public class TestDucklakeSnapshotResolver
     public void setUp()
             throws Exception
     {
-        catalog = new JdbcDucklakeCatalog(DucklakeTestCatalogEnvironment.createDucklakeConfig());
+        catalog = new JdbcDucklakeCatalog(DucklakeTestCatalogEnvironment.createDucklakeConfig().toCatalogConfig());
         sessionProperties = new DucklakeSessionProperties();
     }
 

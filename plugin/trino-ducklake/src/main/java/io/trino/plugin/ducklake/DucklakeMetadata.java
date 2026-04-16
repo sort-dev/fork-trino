@@ -22,6 +22,9 @@ import io.airlift.slice.Slice;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
 import io.trino.plugin.ducklake.catalog.DucklakeColumn;
 import io.trino.plugin.ducklake.catalog.DucklakeColumnStats;
+import io.trino.plugin.ducklake.catalog.DucklakeDeleteFragment;
+import io.trino.plugin.ducklake.catalog.DucklakeWriteFragment;
+import io.trino.plugin.ducklake.catalog.TransactionConflictException;
 import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
 import io.trino.plugin.ducklake.catalog.DucklakeInlinedDataInfo;
 import io.trino.plugin.ducklake.catalog.DucklakePartitionField;
@@ -90,6 +93,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.TRANSACTION_CONFLICT;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DateTimeEncoding.unpackMillisUtc;
 import static io.trino.spi.type.DateType.DATE;
@@ -199,7 +203,7 @@ public class DucklakeMetadata
 
         long snapshotId = snapshotResolver.resolveSnapshotId(session, querySnapshotId, querySnapshotTimestamp);
 
-        Optional<DucklakeTable> table = catalog.getTable(baseTableName, snapshotId);
+        Optional<DucklakeTable> table = catalog.getTable(baseTableName.getSchemaName(), baseTableName.getTableName(), snapshotId);
         if (table.isEmpty()) {
             return null;
         }
@@ -410,10 +414,7 @@ public class DucklakeMetadata
             }
         }
 
-        // Build column type map for typed min/max comparison
-        Map<Long, String> columnTypes = catalog.getTableColumns(table.tableId(), table.snapshotId()).stream()
-                .collect(toImmutableMap(DucklakeColumn::columnId, DucklakeColumn::columnType));
-        List<DucklakeColumnStats> columnStatsList = catalog.getColumnStats(table.tableId(), table.snapshotId(), columnTypes);
+        List<DucklakeColumnStats> columnStatsList = catalog.getColumnStats(table.tableId(), table.snapshotId());
 
         // Index column stats by column ID
         Map<Long, DucklakeColumnStats> statsById = columnStatsList.stream()
@@ -696,13 +697,13 @@ public class DucklakeMetadata
             Optional<MetadataTableName> metadataTable = parseMetadataTableName(tableName);
             if (metadataTable.isPresent()) {
                 SchemaTableName baseTable = new SchemaTableName(tableName.getSchemaName(), metadataTable.get().baseTableName());
-                if (catalog.getTable(baseTable, snapshotId).isPresent()) {
+                if (catalog.getTable(baseTable.getSchemaName(), baseTable.getTableName(), snapshotId).isPresent()) {
                     columns.put(tableName, getMetadataColumns(metadataTable.get().metadataTableType()));
                 }
                 continue;
             }
 
-            Optional<DucklakeTable> table = catalog.getTable(tableName, snapshotId);
+            Optional<DucklakeTable> table = catalog.getTable(tableName.getSchemaName(), tableName.getTableName(), snapshotId);
             if (table.isPresent()) {
                 List<DucklakeColumn> tableColumns = catalog.getTableColumns(table.get().tableId(), snapshotId);
                 columns.put(
@@ -799,13 +800,13 @@ public class DucklakeMetadata
     @Override
     public void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties, TrinoPrincipal owner)
     {
-        catalog.createSchema(schemaName);
+        translateCatalogExceptions(() -> catalog.createSchema(schemaName));
     }
 
     @Override
     public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
     {
-        catalog.dropSchema(schemaName);
+        translateCatalogExceptions(() -> catalog.dropSchema(schemaName));
     }
 
     // ==================== Table DDL ====================
@@ -830,7 +831,7 @@ public class DucklakeMetadata
                 ? Optional.empty()
                 : Optional.of(partitionFields);
 
-        catalog.createTable(tableName.getSchemaName(), tableName.getTableName(), columnSpecs, partitionSpec);
+        translateCatalogExceptions(() -> catalog.createTable(tableName.getSchemaName(), tableName.getTableName(), columnSpecs, partitionSpec));
     }
 
     private TableColumnSpec toColumnSpec(String name, Type trinoType, boolean nullable)
@@ -865,7 +866,7 @@ public class DucklakeMetadata
     public void dropTable(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
-        catalog.dropTable(handle.schemaName(), handle.tableName());
+        translateCatalogExceptions(() -> catalog.dropTable(handle.schemaName(), handle.tableName()));
     }
 
     // ==================== ALTER TABLE ====================
@@ -875,7 +876,7 @@ public class DucklakeMetadata
     {
         DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
         TableColumnSpec columnSpec = toColumnSpec(column.getName(), column.getType(), column.isNullable());
-        catalog.addColumn(handle.tableId(), handle.schemaName(), handle.tableName(), columnSpec);
+        translateCatalogExceptions(() -> catalog.addColumn(handle.tableId(), columnSpec));
     }
 
     @Override
@@ -883,7 +884,7 @@ public class DucklakeMetadata
     {
         DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
         DucklakeColumnHandle ducklakeColumn = (DucklakeColumnHandle) column;
-        catalog.dropColumn(handle.tableId(), handle.schemaName(), handle.tableName(), ducklakeColumn.columnId());
+        translateCatalogExceptions(() -> catalog.dropColumn(handle.tableId(), ducklakeColumn.columnId()));
     }
 
     @Override
@@ -891,7 +892,7 @@ public class DucklakeMetadata
     {
         DucklakeTableHandle handle = (DucklakeTableHandle) tableHandle;
         DucklakeColumnHandle ducklakeColumn = (DucklakeColumnHandle) source;
-        catalog.renameColumn(handle.tableId(), handle.schemaName(), handle.tableName(), ducklakeColumn.columnId(), target);
+        translateCatalogExceptions(() -> catalog.renameColumn(handle.tableId(), ducklakeColumn.columnId(), target));
     }
 
     // ==================== INSERT ====================
@@ -909,7 +910,7 @@ public class DucklakeMetadata
                 .map(DucklakeColumnHandle.class::cast)
                 .collect(toImmutableList());
 
-        List<DucklakeColumn> allCatalogColumns = catalog.getAllColumnsFlat(handle.tableId(), handle.snapshotId());
+        List<DucklakeColumn> allCatalogColumns = catalog.getAllColumnsWithParentage(handle.tableId(), handle.snapshotId());
 
         List<DucklakePartitionSpec> partitionSpecs = catalog.getPartitionSpecs(handle.tableId(), handle.snapshotId());
         Optional<DucklakePartitionSpec> activePartitionSpec = partitionSpecs.isEmpty()
@@ -941,7 +942,7 @@ public class DucklakeMetadata
         List<DucklakeWriteFragment> writeFragments = deserializeFragments(fragments);
 
         if (!writeFragments.isEmpty()) {
-            catalog.commitInsert(handle.tableId(), handle.schemaName(), handle.tableName(), writeFragments);
+            translateCatalogExceptions(() -> catalog.commitInsert(handle.tableId(), writeFragments));
         }
 
         return Optional.empty();
@@ -973,11 +974,11 @@ public class DucklakeMetadata
                 ? Optional.empty()
                 : Optional.of(partitionFields);
 
-        catalog.createTable(tableName.getSchemaName(), tableName.getTableName(), columnSpecs, partitionSpec);
+        translateCatalogExceptions(() -> catalog.createTable(tableName.getSchemaName(), tableName.getTableName(), columnSpecs, partitionSpec));
 
         // Resolve the newly created table to get its ID and build a writable handle
         long snapshotId = catalog.getCurrentSnapshotId();
-        Optional<DucklakeTable> table = catalog.getTable(tableName, snapshotId);
+        Optional<DucklakeTable> table = catalog.getTable(tableName.getSchemaName(), tableName.getTableName(), snapshotId);
         if (table.isEmpty()) {
             throw new TrinoException(NOT_SUPPORTED, "Table was not created: " + tableName);
         }
@@ -992,7 +993,7 @@ public class DucklakeMetadata
                         col.nullsAllowed()))
                 .collect(toImmutableList());
 
-        List<DucklakeColumn> allCatalogColumns = catalog.getAllColumnsFlat(table.get().tableId(), snapshotId);
+        List<DucklakeColumn> allCatalogColumns = catalog.getAllColumnsWithParentage(table.get().tableId(), snapshotId);
 
         List<DucklakePartitionSpec> partitionSpecs = catalog.getPartitionSpecs(table.get().tableId(), snapshotId);
         Optional<DucklakePartitionSpec> activePartitionSpec = partitionSpecs.isEmpty()
@@ -1023,7 +1024,7 @@ public class DucklakeMetadata
         List<DucklakeWriteFragment> writeFragments = deserializeFragments(fragments);
 
         if (!writeFragments.isEmpty()) {
-            catalog.commitInsert(handle.tableId(), handle.schemaName(), handle.tableName(), writeFragments);
+            translateCatalogExceptions(() -> catalog.commitInsert(handle.tableId(), writeFragments));
         }
 
         return Optional.empty();
@@ -1039,7 +1040,7 @@ public class DucklakeMetadata
     private String resolveTableDataPath(String schemaName, String tableName, long snapshotId)
     {
         Optional<DucklakeSchema> schema = catalog.getSchema(schemaName, snapshotId);
-        Optional<DucklakeTable> table = catalog.getTable(new SchemaTableName(schemaName, tableName), snapshotId);
+        Optional<DucklakeTable> table = catalog.getTable(schemaName, tableName, snapshotId);
 
         if (schema.isEmpty() || table.isEmpty()) {
             throw new TrinoException(NOT_SUPPORTED, "Cannot resolve data path for " + schemaName + "." + tableName);
@@ -1081,7 +1082,7 @@ public class DucklakeMetadata
                         col.nullsAllowed()))
                 .collect(toImmutableList());
 
-        List<DucklakeColumn> allCatalogColumns = catalog.getAllColumnsFlat(handle.tableId(), handle.snapshotId());
+        List<DucklakeColumn> allCatalogColumns = catalog.getAllColumnsWithParentage(handle.tableId(), handle.snapshotId());
 
         List<DucklakePartitionSpec> partitionSpecs = catalog.getPartitionSpecs(handle.tableId(), handle.snapshotId());
         Optional<DucklakePartitionSpec> activePartitionSpec = partitionSpecs.isEmpty()
@@ -1147,13 +1148,13 @@ public class DucklakeMetadata
 
         // Commit atomically in a single snapshot — critical for UPDATE (delete+insert must be atomic)
         if (!deleteFragments.isEmpty() && !insertFragments.isEmpty()) {
-            catalog.commitMerge(tableHandle.tableId(), tableHandle.schemaName(), tableHandle.tableName(), deleteFragments, insertFragments);
+            translateCatalogExceptions(() -> catalog.commitMerge(tableHandle.tableId(), deleteFragments, insertFragments));
         }
         else if (!deleteFragments.isEmpty()) {
-            catalog.commitDelete(tableHandle.tableId(), tableHandle.schemaName(), tableHandle.tableName(), deleteFragments);
+            translateCatalogExceptions(() -> catalog.commitDelete(tableHandle.tableId(), deleteFragments));
         }
         else if (!insertFragments.isEmpty()) {
-            catalog.commitInsert(tableHandle.tableId(), tableHandle.schemaName(), tableHandle.tableName(), insertFragments);
+            translateCatalogExceptions(() -> catalog.commitInsert(tableHandle.tableId(), insertFragments));
         }
     }
 
@@ -1241,7 +1242,7 @@ public class DucklakeMetadata
             long snapshotId = snapshotResolver.resolveSnapshotId(session);
             Optional<DucklakeView> existing = catalog.getView(viewName.getSchemaName(), viewName.getTableName(), snapshotId);
             if (existing.isPresent()) {
-                catalog.dropView(viewName.getSchemaName(), viewName.getTableName());
+                translateCatalogExceptions(() -> catalog.dropView(viewName.getSchemaName(), viewName.getTableName()));
             }
         }
 
@@ -1251,7 +1252,7 @@ public class DucklakeMetadata
         String originalSql = definition.getOriginalSql();
         String viewMetadataJson = VIEW_CODEC.toJson(definition);
 
-        catalog.createView(viewName.getSchemaName(), viewName.getTableName(), originalSql, TRINO_VIEW_DIALECT, viewMetadataJson);
+        translateCatalogExceptions(() -> catalog.createView(viewName.getSchemaName(), viewName.getTableName(), originalSql, TRINO_VIEW_DIALECT, viewMetadataJson));
     }
 
     @Override
@@ -1267,11 +1268,11 @@ public class DucklakeMetadata
             throw new ViewNotFoundException(source);
         }
 
-        if (catalog.getTable(target, snapshotId).isPresent() || catalog.getView(target.getSchemaName(), target.getTableName(), snapshotId).isPresent()) {
+        if (catalog.getTable(target.getSchemaName(), target.getTableName(), snapshotId).isPresent() || catalog.getView(target.getSchemaName(), target.getTableName(), snapshotId).isPresent()) {
             throw new TrinoException(ALREADY_EXISTS, "Relation already exists: " + target);
         }
 
-        catalog.renameView(source.getSchemaName(), source.getTableName(), target.getSchemaName(), target.getTableName());
+        translateCatalogExceptions(() -> catalog.renameView(source.getSchemaName(), source.getTableName(), target.getSchemaName(), target.getTableName()));
     }
 
     @Override
@@ -1288,12 +1289,12 @@ public class DucklakeMetadata
                 definition.isRunAsInvoker(),
                 definition.getPath());
 
-        catalog.replaceViewMetadata(
+        translateCatalogExceptions(() -> catalog.replaceViewMetadata(
                 viewName.getSchemaName(),
                 viewName.getTableName(),
                 updated.getOriginalSql(),
                 TRINO_VIEW_DIALECT,
-                VIEW_CODEC.toJson(updated));
+                VIEW_CODEC.toJson(updated)));
     }
 
     @Override
@@ -1327,12 +1328,12 @@ public class DucklakeMetadata
                 definition.isRunAsInvoker(),
                 definition.getPath());
 
-        catalog.replaceViewMetadata(
+        translateCatalogExceptions(() -> catalog.replaceViewMetadata(
                 viewName.getSchemaName(),
                 viewName.getTableName(),
                 updatedDefinition.getOriginalSql(),
                 TRINO_VIEW_DIALECT,
-                VIEW_CODEC.toJson(updatedDefinition));
+                VIEW_CODEC.toJson(updatedDefinition)));
     }
 
     @Override
@@ -1344,7 +1345,7 @@ public class DucklakeMetadata
             throw new ViewNotFoundException(viewName);
         }
 
-        catalog.dropView(viewName.getSchemaName(), viewName.getTableName());
+        translateCatalogExceptions(() -> catalog.dropView(viewName.getSchemaName(), viewName.getTableName()));
     }
 
     private ConnectorViewDefinition getRequiredViewDefinition(ConnectorSession session, SchemaTableName viewName)
@@ -1382,9 +1383,9 @@ public class DucklakeMetadata
     private Optional<ConnectorViewDefinition> decodeTrinoView(DucklakeView view, SchemaTableName viewName)
     {
         // Trino views store the full ConnectorViewDefinition as JSON in column_aliases
-        if (view.columnAliases().isPresent() && !view.columnAliases().get().isBlank()) {
+        if (view.viewMetadata().isPresent() && !view.viewMetadata().get().isBlank()) {
             try {
-                return Optional.of(VIEW_CODEC.fromJson(view.columnAliases().get()));
+                return Optional.of(VIEW_CODEC.fromJson(view.viewMetadata().get()));
             }
             catch (RuntimeException e) {
                 log.warn(e, "Failed to decode Trino view metadata for %s", viewName);
@@ -1393,5 +1394,19 @@ public class DucklakeMetadata
 
         log.warn("View %s has no Trino metadata in column_aliases, cannot resolve column types", viewName);
         return Optional.empty();
+    }
+
+    /**
+     * Translate catalog-layer TransactionConflictException to Trino's
+     * TrinoException(TRANSACTION_CONFLICT) so the engine reports it correctly.
+     */
+    private static void translateCatalogExceptions(Runnable action)
+    {
+        try {
+            action.run();
+        }
+        catch (TransactionConflictException e) {
+            throw new TrinoException(TRANSACTION_CONFLICT, e.getMessage(), e);
+        }
     }
 }

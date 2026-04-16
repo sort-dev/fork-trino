@@ -15,6 +15,7 @@ package io.trino.plugin.ducklake;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
+import io.trino.plugin.ducklake.catalog.DucklakeCatalogConfig;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotNull;
 
@@ -181,5 +182,15 @@ public class DucklakeConfig
     public boolean isSnapshotDefaultsValid()
     {
         return defaultSnapshotId.isEmpty() || defaultSnapshotTimestamp.isEmpty();
+    }
+
+    public DucklakeCatalogConfig toCatalogConfig()
+    {
+        return new DucklakeCatalogConfig()
+                .setCatalogDatabaseUrl(catalogDatabaseUrl)
+                .setCatalogDatabaseUser(catalogDatabaseUser)
+                .setCatalogDatabasePassword(catalogDatabasePassword)
+                .setDataPath(dataPath)
+                .setMaxCatalogConnections(maxCatalogConnections);
     }
 }

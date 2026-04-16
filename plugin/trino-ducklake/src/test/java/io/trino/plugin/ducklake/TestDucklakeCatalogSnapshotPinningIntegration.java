@@ -17,7 +17,7 @@ import io.trino.Session;
 import io.trino.plugin.ducklake.catalog.DucklakeDataFile;
 import io.trino.plugin.ducklake.catalog.DucklakeTable;
 import io.trino.plugin.ducklake.catalog.JdbcDucklakeCatalog;
-import io.trino.spi.connector.SchemaTableName;
+
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import org.junit.jupiter.api.Test;
@@ -67,10 +67,10 @@ public class TestDucklakeCatalogSnapshotPinningIntegration
     private static SnapshotBounds getSchemaEvolutionSnapshotBounds()
             throws Exception
     {
-        JdbcDucklakeCatalog catalog = new JdbcDucklakeCatalog(DucklakeTestCatalogEnvironment.createDucklakeConfig());
+        JdbcDucklakeCatalog catalog = new JdbcDucklakeCatalog(DucklakeTestCatalogEnvironment.createDucklakeConfig().toCatalogConfig());
         try {
             long currentSnapshotId = catalog.getCurrentSnapshotId();
-            DucklakeTable table = catalog.getTable(new SchemaTableName("test_schema", "schema_evolution_table"), currentSnapshotId)
+            DucklakeTable table = catalog.getTable("test_schema", "schema_evolution_table", currentSnapshotId)
                     .orElseThrow(() -> new AssertionError("Missing schema_evolution_table"));
 
             long historicalSnapshotId = -1;
@@ -78,7 +78,7 @@ public class TestDucklakeCatalogSnapshotPinningIntegration
                 if (catalog.getSnapshot(snapshotId).isEmpty()) {
                     continue;
                 }
-                if (catalog.getTable(new SchemaTableName("test_schema", "schema_evolution_table"), snapshotId).isEmpty()) {
+                if (catalog.getTable("test_schema", "schema_evolution_table", snapshotId).isEmpty()) {
                     continue;
                 }
                 long recordCount = catalog.getDataFiles(table.tableId(), snapshotId).stream()

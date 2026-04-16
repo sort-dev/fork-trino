@@ -49,7 +49,7 @@ public class TestDucklakeSplitManager
     {
         DucklakeConfig config = DucklakeTestCatalogEnvironment.createDucklakeConfig();
 
-        catalog = new JdbcDucklakeCatalog(config);
+        catalog = new JdbcDucklakeCatalog(config.toCatalogConfig());
         splitManager = new DucklakeSplitManager(catalog, config, new DucklakePathResolver(catalog, config));
     }
 

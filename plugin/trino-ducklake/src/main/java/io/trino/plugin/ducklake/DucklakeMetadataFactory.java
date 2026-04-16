@@ -16,6 +16,8 @@ package io.trino.plugin.ducklake;
 import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.trino.plugin.ducklake.catalog.DucklakeCatalog;
+import io.trino.plugin.ducklake.catalog.DucklakeDeleteFragment;
+import io.trino.plugin.ducklake.catalog.DucklakeWriteFragment;
 
 import static java.util.Objects.requireNonNull;
 

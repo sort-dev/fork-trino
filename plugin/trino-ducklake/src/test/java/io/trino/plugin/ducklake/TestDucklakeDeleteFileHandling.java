@@ -60,7 +60,7 @@ public class TestDucklakeDeleteFileHandling
                 .setDataPath(isolated.dataDir().toAbsolutePath().toString())
                 .setMaxCatalogConnections(5);
 
-        DucklakeCatalog catalog = new JdbcDucklakeCatalog(config);
+        DucklakeCatalog catalog = new JdbcDucklakeCatalog(config.toCatalogConfig());
         try {
             DucklakeSplitManager splitManager = new DucklakeSplitManager(catalog, config, new DucklakePathResolver(catalog, config));
             DucklakePageSourceProvider pageSourceProvider = new DucklakePageSourceProvider(

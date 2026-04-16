@@ -25,6 +25,8 @@ import io.trino.parquet.writer.ParquetSchemaConverter;
 import io.trino.parquet.writer.ParquetWriter;
 import io.trino.parquet.writer.ParquetWriterOptions;
 import io.trino.plugin.ducklake.DucklakeMergeTableHandle.DataFileRange;
+import io.trino.plugin.ducklake.catalog.DucklakeDeleteFragment;
+import io.trino.plugin.ducklake.catalog.DucklakeWriteFragment;
 import io.trino.spi.Page;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.block.Block;

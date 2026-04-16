@@ -14,6 +14,7 @@
 package io.trino.plugin.ducklake;
 
 import com.google.common.collect.ImmutableList;
+import io.trino.plugin.ducklake.catalog.DucklakeFileColumnStats;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;

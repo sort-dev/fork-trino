@@ -16,6 +16,8 @@ package io.trino.plugin.ducklake;
 import com.google.inject.Inject;
 import io.airlift.json.JsonCodec;
 import io.trino.parquet.writer.ParquetWriterOptions;
+import io.trino.plugin.ducklake.catalog.DucklakeDeleteFragment;
+import io.trino.plugin.ducklake.catalog.DucklakeWriteFragment;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.PageIndexerFactory;

@@ -13,22 +13,13 @@
  */
 package io.trino.plugin.ducklake.catalog;
 
-import java.util.Optional;
-import java.util.OptionalLong;
-
 /**
- * Represents a view stored in the ducklake_view catalog table.
- * Views are snapshot-scoped: visible from beginSnapshot until endSnapshot.
+ * Describes a range predicate on a column for data file pruning.
+ * Values are string representations — the catalog performs typed comparison
+ * (numeric, date, etc.) internally based on the column's type.
+ *
+ * @param columnId the column to filter on
+ * @param minValue the lower bound (inclusive), or null for unbounded
+ * @param maxValue the upper bound (inclusive), or null for unbounded
  */
-public record DucklakeView(
-        long viewId,
-        String viewUuid,
-        long schemaId,
-        String viewName,
-        String sql,
-        String dialect,
-        Optional<String> viewMetadata,
-        long beginSnapshot,
-        OptionalLong endSnapshot)
-{
-}
+public record ColumnRangePredicate(long columnId, String minValue, String maxValue) {}

@@ -13,22 +13,15 @@
  */
 package io.trino.plugin.ducklake.catalog;
 
-import java.util.Optional;
-import java.util.OptionalLong;
-
 /**
- * Represents a view stored in the ducklake_view catalog table.
- * Views are snapshot-scoped: visible from beginSnapshot until endSnapshot.
+ * Thrown when a catalog operation fails due to a concurrent commit
+ * (optimistic concurrency conflict on the snapshot sequence).
  */
-public record DucklakeView(
-        long viewId,
-        String viewUuid,
-        long schemaId,
-        String viewName,
-        String sql,
-        String dialect,
-        Optional<String> viewMetadata,
-        long beginSnapshot,
-        OptionalLong endSnapshot)
+public class TransactionConflictException
+        extends DucklakeException
 {
+    public TransactionConflictException(String message, Throwable cause)
+    {
+        super(message, cause);
+    }
 }
