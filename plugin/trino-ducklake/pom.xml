@@ -216,11 +216,11 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- DuckDB 1.5.1 for Ducklake extension support (bug fixes in ducklake area) -->
+        <!-- DuckDB 1.5.2 for DuckLake 1.0 spec support -->
         <dependency>
             <groupId>org.duckdb</groupId>
             <artifactId>duckdb_jdbc</artifactId>
-            <version>1.5.1.0</version>
+            <version>1.5.2.0</version>
             <scope>test</scope>
         </dependency>
 
